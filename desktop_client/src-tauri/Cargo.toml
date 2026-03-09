@@ -1,0 +1,45 @@
+[package]
+name = "opendesk-desktop-client"
+version = "0.1.0"
+description = "OpenDesk AI Desktop Client — Screen capture and input simulation agent"
+authors = []
+edition = "2021"
+
+[lib]
+name = "opendesk_desktop_client_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri framework
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# WebSocket client (connection to Go Gateway)
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+
+# Serialization (parsing AgentActionCommand / DeviceObservationPayload)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# OS-level input simulation (mouse clicks, keyboard presses)
+enigo = { version = "0.3", features = ["serde"] }
+
+# Fast screen capturing
+xcap = "0.2"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Base64 encoding for screenshots
+base64 = "0.22"
+
+# Image compression (JPEG encoding before Base64)
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
