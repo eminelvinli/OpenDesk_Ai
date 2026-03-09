@@ -1,0 +1,74 @@
+# 🏗️ OpenDesk AI - System Architecture
+
+This document provides an in-depth technical overview of the OpenDesk AI ecosystem. It is intended for software architects, core contributors, and AI coding agents to understand the data flow, network topology, and state management across the monorepo.
+
+
+
+## 1. Network Topology & Communication Protocols
+
+OpenDesk AI utilizes a hybrid communication strategy to balance real-time low latency with robust RESTful operations.
+
+* **Frontend ↔ Backend:** Standard HTTPS REST/GraphQL APIs for CRUD operations (Users, Tasks, Device management). Server-Sent Events (SSE) or WebSockets are used for streaming live Agent statuses to the Web Dashboard.
+* **Desktop Client ↔ Gateway:** Persistent, bidirectional **WebSockets** (or gRPC streams) over TLS. This allows the backend to instantly wake up the client and push coordinate commands, while the client can stream screenshots back at high frame rates.
+* **Gateway ↔ Backend:** Internal network gRPC or Redis Pub/Sub. The Go Gateway terminates the external WebSocket connections and routes the binary/JSON payloads to the Node.js backend efficiently.
+
+---
+
+## 2. Component Deep Dive
+
+### 2.1. The Desktop Client (`/desktop_client` - Rust)
+* **Engine:** `Tauri` (provides a minimal footprint).
+* **Input Simulation:** Libraries like `enigo` translate JSON commands (`{ "action": "click", "x": 100, "y": 200 }`) into OS-level system calls (Windows API, X11/Wayland, macOS Cocoa).
+* **Capture Pipeline:** A dedicated background thread captures the screen (e.g., using `scrap`), compresses it to JPEG/WebP in memory, encodes it to Base64, and pushes it over the WebSocket channel.
+* **Security Context:** Runs with standard user privileges. Does not require root/admin unless interacting with elevated system prompts.
+
+### 2.2. The Real-time Gateway (`/gateway` - Go)
+* **Connection Pool:** Maintains an in-memory map of `DeviceID -> WebSocket Connection`.
+* **Stateless Routing:** It does not store task data. If a message arrives from the Node.js backend addressed to `DeviceID: 12345`, the Gateway instantly routes it to the corresponding socket.
+* **Load Balancing:** Designed to scale horizontally. Multiple Go instances can run behind a load balancer (e.g., NGINX/HAProxy), using Redis Pub/Sub to route messages across instances.
+
+### 2.3. The Core Backend (`/backend` - Node.js)
+* **Agentic Loop Engine:** Uses a State Machine (via LangGraph or custom logic). Each task creates a unique `ExecutionState` containing the goal, the active `DeviceID`, and the `actionHistory`.
+* **Vision LLM Integration:** Constructs the prompt by combining:
+    1.  System Instruction (Strict JSON enforcer).
+    2.  User Persona Context (Fetched via RAG).
+    3.  Action History (e.g., "1. Opened Chrome. 2. Typed URL.").
+    4.  Current Screenshot (Base64).
+* **Task Scheduler (BullMQ):** Backed by Redis. Handles delayed execution (e.g., "Do this at 9 PM") and retry logic if the desktop client is offline.
+
+---
+
+## 3. Data Flow: The Agentic Execution Path
+
+When a user submits a task like *"Like the latest post on my Facebook feed"*, the following sequence occurs:
+
+1.  **Initiation:** The Next.js frontend sends a POST request to the Node.js backend.
+2.  **Job Queuing:** The backend creates a Job in BullMQ.
+3.  **Wake Up:** The BullMQ worker picks up the job, finds the `DeviceID`, and sends a `START_CAPTURE` command to the Go Gateway via Redis Pub/Sub.
+4.  **Observation Stream:** The Gateway forwards this to the Rust Client. Rust begins sending screenshots (e.g., 1 frame per second) back through the Gateway to the Backend.
+5.  **LLM Inference:** The Backend takes the latest screenshot and queries the Vision LLM.
+6.  **Action Dispatch:** The LLM returns a JSON action (`{ "action": "scroll_down" }`). The Backend logs this to MongoDB and forwards it to the Gateway.
+7.  **Physical Execution:** The Gateway pushes it to Rust. Rust executes the scroll.
+8.  **Loop/Termination:** Rust takes a new screenshot. The loop continues until the LLM returns `{ "action": "done" }`.
+
+---
+
+## 4. Database & Storage Strategy
+
+### 4.1. MongoDB (Primary Data Store)
+* **`Users` Collection:** Stores user credentials, subscription tiers, and API keys.
+* **`Devices` Collection:** Maps `DeviceID` to `UserID`, stores last seen status, OS type, and screen resolution.
+* **`TaskLogs` Collection:** A heavy-write collection. Stores every step the AI takes for auditing and user playback.
+* **`Personas` Collection (Vector Search):** Stores embedded text chunks of user preferences ("I write casually", "Use this specific folder path"). Used for RAG.
+
+### 4.2. Redis (Ephemeral State & Queues)
+* **BullMQ Queues:** `scheduled_tasks`, `immediate_tasks`.
+* **Session Cache:** Active device connections and temporary Agent execution states to prevent hammering MongoDB on every single loop iteration.
+
+---
+
+## 5. Security & Isolation
+
+* **Zero-Trust Commands:** The Node.js backend must validate every coordinate generated by the LLM against the known `screenBounds` of the active device before sending it to the Rust client.
+* **End-to-End Traceability:** Every action taken by the AI is logged with a timestamp and the exact screenshot that triggered the decision.
+* **API Key Management:** User-provided LLM API keys (if applicable) are encrypted at rest using AES-256-GCM before being stored in MongoDB.
