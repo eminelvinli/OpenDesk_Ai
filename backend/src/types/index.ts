@@ -22,6 +22,23 @@ export interface ScreenBounds {
     height: number;
 }
 
+/**
+ * Metadata about a single connected monitor, reported by the Rust client.
+ * Mirrors xcap::Monitor fields.
+ */
+export interface MonitorInfo {
+    /** Zero-based monitor index. Pass as `monitorId` in AgentActionCommand.params. */
+    id: number;
+    /** Human-readable display name (e.g. "Monitor 1", "Dell U2722D"). */
+    name: string;
+    /** Display width in pixels. */
+    width: number;
+    /** Display height in pixels. */
+    height: number;
+    /** True if this is the system primary display. */
+    isPrimary: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Agent Action Types (Backend → Rust via Gateway)
 // ---------------------------------------------------------------------------
@@ -107,10 +124,22 @@ export interface DeviceObservationPayload {
     /** Current screen resolution of the device. */
     screenBounds: ScreenBounds;
 
+    /** Total number of monitors currently connected to the device. */
+    monitorCount: number;
+
+    /** Zero-based index of the monitor that was captured for this observation. */
+    activeMonitorId: number;
+
+    /**
+     * Metadata for all connected monitors.
+     * Populated on the first observation and whenever monitor topology changes.
+     * The frontend uses this to render a monitor selector.
+     */
+    monitors?: MonitorInfo[];
+
     /**
      * Result of a data-returning skill tool (read_clipboard / get_active_window_title).
      * Populated only when the Rust client executed a query-type tool action.
-     * The agentic loop injects this into the LLM context as a tool_result.
      */
     toolResult?: ToolResultPayload;
 }

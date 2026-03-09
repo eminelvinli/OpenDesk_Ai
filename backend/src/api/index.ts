@@ -11,10 +11,14 @@ import { enqueueTask, cancelTaskForDevice } from '../jobs/queue';
 import { TaskLog, Device } from '../db';
 import { AgentActionType, DeviceObservationPayload } from '../types';
 import { pushObservation, pushAgentStatus } from './stream';
+import voiceRouter from './voice';
 
 const router = Router();
 
-/** Valid action types for command validation. */
+// Voice transcription endpoint (multipart audio → Whisper → BullMQ).
+router.use('/tasks/voice', voiceRouter);
+
+/** Valid action types — includes original + OS-level skill tools. */
 const VALID_ACTIONS: AgentActionType[] = [
     'mouse_move',
     'mouse_click',
@@ -22,6 +26,10 @@ const VALID_ACTIONS: AgentActionType[] = [
     'keyboard_type',
     'keyboard_press',
     'done',
+    'read_clipboard',
+    'write_clipboard',
+    'scroll_window',
+    'get_active_window_title',
 ];
 
 /**

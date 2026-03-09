@@ -96,10 +96,15 @@ pub struct DeviceObservationPayload {
     pub timestamp: u64,
     pub screen_base64: String,
     pub screen_bounds: ScreenBounds,
+/// Total number of monitors detected on the device.
+    pub monitor_count: usize,
+    /// Zero-based index of the captured monitor (matches REQUESTED_MONITOR_ID).
+    pub active_monitor_id: usize,
+    /// Metadata for all connected monitors (populated each frame).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitors: Option<Vec<MonitorInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    /// Populated when a data-returning skill (read_clipboard, get_active_window_title)
-    /// was just executed. The backend injects this into the next LLM call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result: Option<ToolResultPayload>,
 }
@@ -136,7 +141,6 @@ const MOUSE_OVERRIDE_THRESHOLD: i32 = 50;
 // ---------------------------------------------------------------------------
 
 /// Atomic kill switch flag. Set to true by the hotkey thread.
-/// When true, the WebSocket loop severs immediately.
 static KILL_SWITCH_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Tracks modifier key states for the Ctrl+Alt+K combo.
@@ -146,6 +150,10 @@ static ALT_HELD: AtomicBool = AtomicBool::new(false);
 /// Last known physical mouse position (set after each observation).
 static LAST_MOUSE_X: AtomicI32 = AtomicI32::new(0);
 static LAST_MOUSE_Y: AtomicI32 = AtomicI32::new(0);
+
+/// Which monitor to capture.
+/// -1 = primary (default). Set by incoming AgentActionCommand with params.monitorId.
+static REQUESTED_MONITOR_ID: AtomicI32 = AtomicI32::new(-1);
 
 // ---------------------------------------------------------------------------
 // Kill Switch Hotkey Thread (rdev)
@@ -255,25 +263,54 @@ fn is_mouse_overridden(last_x: i32, last_y: i32) -> bool {
     overridden
 }
 
+
 // ---------------------------------------------------------------------------
-// Screen Capture (xcap)
+// Screen Capture (xcap) — Multi-Monitor
 // ---------------------------------------------------------------------------
 
-/// Capture the primary monitor and return a JPEG-encoded base64 data URI.
-/// Also reads the current cursor position for mouse override tracking.
-fn capture_screen() -> Result<(String, ScreenBounds, i32, i32), String> {
+/// Enumerate all connected monitors and return MonitorInfo metadata.
+fn list_monitors() -> Result<Vec<MonitorInfo>, String> {
     let monitors = Monitor::all().map_err(|e| format!("Failed to list monitors: {}", e))?;
-    let monitor = monitors
+    Ok(monitors
         .into_iter()
-        .next()
-        .ok_or_else(|| "No monitors found".to_string())?;
+        .enumerate()
+        .map(|(i, m)| MonitorInfo {
+            id: i,
+            name: m.name().to_string(),
+            width: m.width(),
+            height: m.height(),
+            is_primary: i == 0, // xcap lists the primary display first
+        })
+        .collect())
+}
 
+/// Capture a specific monitor by zero-based index.
+/// Falls back to the primary monitor (index 0) if index is out of range.
+fn capture_screen_by_id(monitor_id: usize) -> Result<(String, ScreenBounds, i32, i32), String> {
+    let monitors = Monitor::all().map_err(|e| format!("Failed to list monitors: {}", e))?;
+
+    if monitors.is_empty() {
+        return Err("No monitors found".to_string());
+    }
+
+    let idx = if monitor_id < monitors.len() {
+        monitor_id
+    } else {
+        warn!(
+            "Monitor {} not found ({} available), falling back to primary",
+            monitor_id,
+            monitors.len()
+        );
+        0
+    };
+
+    let monitor = &monitors[idx];
     let width = monitor.width();
     let height = monitor.height();
 
     let image = monitor
         .capture_image()
-        .map_err(|e| format!("Screen capture failed: {}", e))?;
+        .map_err(|e| format!("Screen capture failed on monitor {}: {}", idx, e))?;
 
     let mut jpeg_buf: Vec<u8> = Vec::new();
     let mut cursor = Cursor::new(&mut jpeg_buf);
@@ -285,28 +322,42 @@ fn capture_screen() -> Result<(String, ScreenBounds, i32, i32), String> {
     let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf);
     let data_uri = format!("data:image/jpeg;base64,{}", b64);
 
-    // We use the center of the screen as a proxy for cursor position
-    // since xcap doesn't expose cursor coords. rdev updates this asynchronously.
+    // rdev updates mouse position asynchronously via the hotkey listener thread.
     let mouse_x = LAST_MOUSE_X.load(Ordering::SeqCst);
     let mouse_y = LAST_MOUSE_Y.load(Ordering::SeqCst);
 
     Ok((data_uri, ScreenBounds { width, height }, mouse_x, mouse_y))
 }
 
+/// Create a full DeviceObservationPayload with multi-monitor metadata.
 fn create_observation() -> Result<(DeviceObservationPayload, i32, i32), String> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    let (screen_base64, screen_bounds, mouse_x, mouse_y) = capture_screen()?;
+    // Read which monitor to capture (set by execute_command when params.monitorId is present).
+    let monitor_id = {
+        let raw = REQUESTED_MONITOR_ID.load(Ordering::SeqCst);
+        if raw < 0 { 0usize } else { raw as usize }
+    };
+
+    let (screen_base64, screen_bounds, mouse_x, mouse_y) = capture_screen_by_id(monitor_id)?;
+
+    // Build monitor metadata (no pixel capture — metadata only, cheap).
+    let monitor_list = list_monitors().unwrap_or_default();
+    let monitor_count = monitor_list.len();
 
     let payload = DeviceObservationPayload {
         device_id: DEVICE_ID.to_string(),
         timestamp,
         screen_base64,
         screen_bounds,
+        monitor_count,
+        active_monitor_id: monitor_id,
+        monitors: Some(monitor_list),
         status: None,
+        tool_result: None,
     };
 
     Ok((payload, mouse_x, mouse_y))
@@ -324,11 +375,14 @@ fn create_interrupted_payload(reason: &str) -> DeviceObservationPayload {
         timestamp,
         screen_base64: String::new(),
         screen_bounds: ScreenBounds { width: 0, height: 0 },
+        monitor_count: 0,
+        active_monitor_id: 0,
+        monitors: None,
         status: Some(format!("interrupted:{}", reason)),
+        tool_result: None,
     }
 }
 
-// ---------------------------------------------------------------------------
 // Command Execution (enigo) with Kill Switch + Mouse Override
 // ---------------------------------------------------------------------------
 

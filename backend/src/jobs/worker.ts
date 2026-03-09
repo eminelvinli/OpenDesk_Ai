@@ -127,6 +127,8 @@ function createObservationGetter(
             timestamp: Math.floor(Date.now() / 1000),
             screenBase64: 'data:image/jpeg;base64,/9j/mock-screenshot-data',
             screenBounds: { width: 1920, height: 1080 },
+            monitorCount: 1,
+            activeMonitorId: 0,
         };
     };
 }

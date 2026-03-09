@@ -5,6 +5,7 @@ import LiveView from '@/components/LiveView';
 import TaskInput from '@/components/TaskInput';
 import PairDeviceModal from '@/components/PairDeviceModal';
 import LogConsole from '@/components/LogConsole';
+import MicrophoneButton from '@/components/MicrophoneButton';
 
 
 const DEVICE_ID = 'dev-rust-001';
@@ -13,6 +14,7 @@ export default function DashboardPage() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [showPairModal, setShowPairModal] = useState(false);
   const [activeTab, setActiveTab] = useState<'live' | 'console'>('live');
+  const [voiceTranscript, setVoiceTranscript] = useState<string | null>(null);
 
 
   return (
@@ -64,8 +66,8 @@ export default function DashboardPage() {
                   key={tab}
                   onClick={() => setActiveTab(tab)}
                   className={`px-4 py-2 text-sm font-medium transition-all duration-150 border-b-2 -mb-px ${activeTab === tab
-                      ? 'border-blue-500 text-blue-400'
-                      : 'border-transparent text-slate-500 hover:text-slate-300'
+                    ? 'border-blue-500 text-blue-400'
+                    : 'border-transparent text-slate-500 hover:text-slate-300'
                     }`}
                 >
                   {tab === 'live' ? '🖥 Live View' : '📋 Console'}
@@ -98,7 +100,31 @@ export default function DashboardPage() {
 
           {/* Right Column — Controls (takes 1/3) */}
           <div className="space-y-6">
-            <TaskInput onTaskStarted={setActiveTaskId} />
+            {/* Task Input + Voice Button row */}
+            <div className="relative">
+              <TaskInput onTaskStarted={setActiveTaskId} />
+              {/* Voice command button — floats in bottom-right of the input card */}
+              <div className="absolute bottom-4 right-4">
+                <MicrophoneButton
+                  deviceId={DEVICE_ID}
+                  userId="000000000000000000000001"
+                  onTranscribed={(text, taskLogId) => {
+                    setVoiceTranscript(text);
+                    setActiveTaskId(taskLogId);
+                    // Clear transcript preview after 5 seconds.
+                    setTimeout(() => setVoiceTranscript(null), 5000);
+                  }}
+                />
+              </div>
+            </div>
+
+            {/* Voice transcript feedback */}
+            {voiceTranscript && (
+              <div className="bg-violet-900/30 backdrop-blur border border-violet-700/50 rounded-xl px-4 py-3">
+                <p className="text-[10px] text-violet-400 uppercase tracking-wider mb-1">🎙 Voice Command</p>
+                <p className="text-sm text-white leading-snug">&ldquo;{voiceTranscript}&rdquo;</p>
+              </div>
+            )}
 
             {/* Device Info */}
             <div className="bg-slate-800/50 backdrop-blur border border-slate-700 rounded-xl p-6">
