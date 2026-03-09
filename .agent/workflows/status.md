@@ -2,85 +2,51 @@
 description: Display agent and project status. Progress tracking and status board.
 ---
 
-# /status - Show Status
+# /status - Project Status (OpenDesk AI)
 
 $ARGUMENTS
 
 ---
 
-## Task
+## Purpose
 
-Show current project and agent status.
-
-### What It Shows
-
-1. **Project Info**
-   - Project name and path
-   - Tech stack
-   - Current features
-
-2. **Agent Status Board**
-   - Which agents are running
-   - Which tasks are completed
-   - Pending work
-
-3. **File Statistics**
-   - Files created count
-   - Files modified count
-
-4. **Preview Status**
-   - Is server running
-   - URL
-   - Health check
+Display the current status of the OpenDesk AI monorepo — agents, services, and task progress.
 
 ---
 
-## Example Output
+## Usage
 
 ```
-=== Project Status ===
-
-📁 Project: my-ecommerce
-📂 Path: C:/projects/my-ecommerce
-🏷️ Type: nextjs-ecommerce
-📊 Status: active
-
-🔧 Tech Stack:
-   Framework: next.js
-   Database: postgresql
-   Auth: clerk
-   Payment: stripe
-
-✅ Features (5):
-   • product-listing
-   • cart
-   • checkout
-   • user-auth
-   • order-history
-
-⏳ Pending (2):
-   • admin-panel
-   • email-notifications
-
-📄 Files: 73 created, 12 modified
-
-=== Agent Status ===
-
-✅ database-architect → Completed
-✅ backend-specialist → Completed
-🔄 frontend-specialist → Dashboard components (60%)
-⏳ test-engineer → Waiting
-
-=== Preview ===
-
-🌐 URL: http://localhost:3000
-💚 Health: OK
+/status           - Full status board
+/status agents    - List available agents
+/status services  - Service health check
 ```
 
 ---
 
-## Technical
+## Status Board Format
 
-Status uses these scripts:
-- `python .agent/scripts/session_manager.py status`
-- `python .agent/scripts/auto_preview.py status`
+```markdown
+## 🌐 OpenDesk AI Status
+
+### Services
+| Service | Directory | Language | Status |
+|---|---|---|---|
+| Desktop Client | `/desktop_client` | Rust + Tauri | ⚪ Development |
+| Gateway | `/gateway` | Go | ⚪ Development |
+| Backend | `/backend` | Node.js + TS | ⚪ Development |
+| Frontend | `/frontend` | Next.js + TS | ⚪ Development |
+
+### Infrastructure
+| Component | Status |
+|---|---|
+| MongoDB | ⚪ Not configured |
+| Redis | ⚪ Not configured |
+| Docker Compose | ⚪ Not configured |
+
+### Active Agents (13)
+orchestrator, project-planner, rust-specialist, go-specialist,
+backend-specialist, frontend-specialist, database-architect,
+security-auditor, devops-engineer, test-engineer, debugger,
+explorer-agent, performance-optimizer
+```

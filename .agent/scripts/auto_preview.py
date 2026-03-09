@@ -1,148 +1,108 @@
 #!/usr/bin/env python3
 """
-Auto Preview - Antigravity Kit
-==============================
-Manages (start/stop/status) the local development server for previewing the application.
+Auto Preview - OpenDesk AI
+===========================
+
+Start/stop/check development servers for all OpenDesk AI services.
+Uses Docker Compose by default, with fallback to local commands.
 
 Usage:
-    python .agent/scripts/auto_preview.py start [port]
+    python .agent/scripts/auto_preview.py start
     python .agent/scripts/auto_preview.py stop
     python .agent/scripts/auto_preview.py status
 """
 
-import os
 import sys
-import time
-import json
-import signal
-import argparse
 import subprocess
+import shutil
 from pathlib import Path
 
-AGENT_DIR = Path(".agent")
-PID_FILE = AGENT_DIR / "preview.pid"
-LOG_FILE = AGENT_DIR / "preview.log"
+class Colors:
+    GREEN = '\033[92m'
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    CYAN = '\033[96m'
+    BOLD = '\033[1m'
+    ENDC = '\033[0m'
 
-def get_project_root():
-    return Path(".").resolve()
+def has_docker_compose() -> bool:
+    """Check if docker compose is available."""
+    return shutil.which("docker") is not None
 
-def is_running(pid):
+def run_cmd(cmd: str, cwd: str = ".") -> tuple:
+    """Run a command and return (success, output)."""
     try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-def get_start_command(root):
-    pkg_file = root / "package.json"
-    if not pkg_file.exists():
-        return None
-    
-    with open(pkg_file, 'r') as f:
-        data = json.load(f)
-    
-    scripts = data.get("scripts", {})
-    if "dev" in scripts:
-        return ["npm", "run", "dev"]
-    elif "start" in scripts:
-        return ["npm", "start"]
-    return None
-
-def start_server(port=3000):
-    if PID_FILE.exists():
-        try:
-            pid = int(PID_FILE.read_text().strip())
-            if is_running(pid):
-                print(f"⚠️  Preview already running (PID: {pid})")
-                return
-        except:
-            pass # Invalid PID file
-
-    root = get_project_root()
-    cmd = get_start_command(root)
-    
-    if not cmd:
-        print("❌ No 'dev' or 'start' script found in package.json")
-        sys.exit(1)
-    
-    # Add port env var if needed (simple heuristic)
-    env = os.environ.copy()
-    env["PORT"] = str(port)
-    
-    print(f"🚀 Starting preview on port {port}...")
-    
-    with open(LOG_FILE, "w") as log:
-        process = subprocess.Popen(
-            cmd,
-            cwd=str(root),
-            stdout=log,
-            stderr=log,
-            env=env,
-            shell=True # Required for npm on windows often, or consistent path handling
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, cwd=cwd, timeout=30
         )
-    
-    PID_FILE.write_text(str(process.pid))
-    print(f"✅ Preview started! (PID: {process.pid})")
-    print(f"   Logs: {LOG_FILE}")
-    print(f"   URL: http://localhost:{port}")
-
-def stop_server():
-    if not PID_FILE.exists():
-        print("ℹ️  No preview server found.")
-        return
-
-    try:
-        pid = int(PID_FILE.read_text().strip())
-        if is_running(pid):
-            # Try gentle kill first
-            os.kill(pid, signal.SIGTERM) if sys.platform != 'win32' else subprocess.call(['taskkill', '/F', '/T', '/PID', str(pid)])
-            print(f"🛑 Preview stopped (PID: {pid})")
-        else:
-            print("ℹ️  Process was not running.")
+        return result.returncode == 0, result.stdout + result.stderr
     except Exception as e:
-        print(f"❌ Error stopping server: {e}")
-    finally:
-        if PID_FILE.exists():
-            PID_FILE.unlink()
+        return False, str(e)
 
-def status_server():
-    running = False
-    pid = None
-    url = "Unknown"
-    
-    if PID_FILE.exists():
-        try:
-            pid = int(PID_FILE.read_text().strip())
-            if is_running(pid):
-                running = True
-                # Heuristic for URL, strictly we should save it
-                url = "http://localhost:7001" 
-        except:
-            pass
-            
-    print("\n=== Preview Status ===")
-    if running:
-        print(f"✅ Status: Running")
-        print(f"🔢 PID: {pid}")
-        print(f"🌐 URL: {url} (Likely)")
-        print(f"📝 Logs: {LOG_FILE}")
+def start_services():
+    """Start all OpenDesk AI services."""
+    print(f"{Colors.BOLD}{Colors.CYAN}🚀 Starting OpenDesk AI services...{Colors.ENDC}\n")
+
+    if has_docker_compose():
+        success, output = run_cmd("docker compose up -d")
+        if success:
+            print(f"{Colors.GREEN}✅ All services started via Docker Compose{Colors.ENDC}")
+            print(f"   📦 MongoDB:  localhost:27017")
+            print(f"   📦 Redis:    localhost:6379")
+            print(f"   🧠 Backend:  http://localhost:3001")
+            print(f"   🌐 Gateway:  ws://localhost:8080")
+            print(f"   🎨 Frontend: http://localhost:3000")
+        else:
+            print(f"{Colors.RED}❌ Docker Compose failed{Colors.ENDC}")
+            print(output[:300])
     else:
-        print("⚪ Status: Stopped")
-    print("===================\n")
+        print(f"{Colors.YELLOW}⚠️  Docker not found. Start services manually:{Colors.ENDC}")
+        print(f"   cd backend && npm run dev")
+        print(f"   cd frontend && npm run dev")
+        print(f"   cd gateway && go run main.go")
+        print(f"   cd desktop_client && cargo run")
+
+def stop_services():
+    """Stop all services."""
+    print(f"{Colors.BOLD}{Colors.CYAN}🛑 Stopping OpenDesk AI services...{Colors.ENDC}")
+    if has_docker_compose():
+        run_cmd("docker compose down")
+        print(f"{Colors.GREEN}✅ All services stopped{Colors.ENDC}")
+    else:
+        print(f"{Colors.YELLOW}⚠️  Docker not found. Stop services manually.{Colors.ENDC}")
+
+def check_status():
+    """Check status of all services."""
+    print(f"{Colors.BOLD}{Colors.CYAN}🌐 OpenDesk AI Service Status{Colors.ENDC}\n")
+    if has_docker_compose():
+        success, output = run_cmd("docker compose ps")
+        if success:
+            print(output)
+        else:
+            print(f"{Colors.YELLOW}No services running{Colors.ENDC}")
+    else:
+        print(f"{Colors.YELLOW}Docker not available. Check services manually.{Colors.ENDC}")
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["start", "stop", "status"])
-    parser.add_argument("port", nargs="?", default="3000")
-    
-    args = parser.parse_args()
-    
-    if args.action == "start":
-        start_server(int(args.port))
-    elif args.action == "stop":
-        stop_server()
-    elif args.action == "status":
-        status_server()
+    if len(sys.argv) < 2:
+        check_status()
+        return
+
+    command = sys.argv[1].lower()
+
+    if command == "start":
+        start_services()
+    elif command == "stop":
+        stop_services()
+    elif command == "status":
+        check_status()
+    elif command == "restart":
+        stop_services()
+        start_services()
+    else:
+        print(f"Unknown command: {command}")
+        print("Usage: auto_preview.py [start|stop|status|restart]")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

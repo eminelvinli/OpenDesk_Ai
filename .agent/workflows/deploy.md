@@ -1,8 +1,8 @@
 ---
-description: Deployment command for production releases. Pre-flight checks and deployment execution.
+description: Deployment command for production releases. Pre-flight checks and multi-service deployment.
 ---
 
-# /deploy - Production Deployment
+# /deploy - Production Deployment (OpenDesk AI)
 
 $ARGUMENTS
 
@@ -10,7 +10,7 @@ $ARGUMENTS
 
 ## Purpose
 
-This command handles production deployment with pre-flight checks, deployment execution, and verification.
+Deploy the OpenDesk AI multi-service system with pre-flight checks, Docker builds, and verification.
 
 ---
 
@@ -19,7 +19,7 @@ This command handles production deployment with pre-flight checks, deployment ex
 ```
 /deploy            - Interactive deployment wizard
 /deploy check      - Run pre-deployment checks only
-/deploy preview    - Deploy to preview/staging
+/deploy staging    - Deploy to staging environment
 /deploy production - Deploy to production
 /deploy rollback   - Rollback to previous version
 ```
@@ -28,30 +28,34 @@ This command handles production deployment with pre-flight checks, deployment ex
 
 ## Pre-Deployment Checklist
 
-Before any deployment:
-
 ```markdown
-## 🚀 Pre-Deploy Checklist
+## 🚀 Pre-Deploy Checklist (All Services)
 
-### Code Quality
-- [ ] No TypeScript errors (`npx tsc --noEmit`)
-- [ ] ESLint passing (`npx eslint .`)
-- [ ] All tests passing (`npm test`)
+### /desktop_client (Rust)
+- [ ] `cargo clippy` — no warnings
+- [ ] `cargo test` — all tests pass
+- [ ] `cargo build --release` — binary compiles
+
+### /gateway (Go)
+- [ ] `go vet ./...` — no issues
+- [ ] `go test ./...` — all tests pass
+- [ ] `go build` — binary compiles
+
+### /backend (Node.js)
+- [ ] `npx tsc --noEmit` — no TypeScript errors
+- [ ] `npm run lint` — ESLint passing
+- [ ] `npm test` — all tests pass
+
+### /frontend (Next.js)
+- [ ] `npx tsc --noEmit` — no TypeScript errors
+- [ ] `npm run lint` — ESLint passing
+- [ ] `npm test` — all tests pass
+- [ ] `npm run build` — Next.js builds successfully
 
 ### Security
-- [ ] No hardcoded secrets
+- [ ] No hardcoded secrets in any service
 - [ ] Environment variables documented
-- [ ] Dependencies audited (`npm audit`)
-
-### Performance
-- [ ] Bundle size acceptable
-- [ ] No console.log statements
-- [ ] Images optimized
-
-### Documentation
-- [ ] README updated
-- [ ] CHANGELOG updated
-- [ ] API docs current
+- [ ] `npm audit` clean (backend + frontend)
 
 ### Ready to deploy? (y/n)
 ```
@@ -61,116 +65,20 @@ Before any deployment:
 ## Deployment Flow
 
 ```
-┌─────────────────┐
-│  /deploy        │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Pre-flight     │
-│  checks         │
-└────────┬────────┘
-         │
-    Pass? ──No──► Fix issues
-         │
-        Yes
-         │
-         ▼
-┌─────────────────┐
-│  Build          │
-│  application    │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Deploy to      │
-│  platform       │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Health check   │
-│  & verify       │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  ✅ Complete    │
-└─────────────────┘
+docker compose build
+docker compose up -d
 ```
 
----
+Services start in order: MongoDB → Redis → Backend → Gateway → Frontend
 
-## Output Format
-
-### Successful Deploy
-
-```markdown
-## 🚀 Deployment Complete
-
-### Summary
-- **Version:** v1.2.3
-- **Environment:** production
-- **Duration:** 47 seconds
-- **Platform:** Vercel
-
-### URLs
-- 🌐 Production: https://app.example.com
-- 📊 Dashboard: https://vercel.com/project
-
-### What Changed
-- Added user profile feature
-- Fixed login bug
-- Updated dependencies
-
-### Health Check
-✅ API responding (200 OK)
-✅ Database connected
-✅ All services healthy
-```
-
-### Failed Deploy
-
-```markdown
-## ❌ Deployment Failed
-
-### Error
-Build failed at step: TypeScript compilation
-
-### Details
-```
-error TS2345: Argument of type 'string' is not assignable...
-```
-
-### Resolution
-1. Fix TypeScript error in `src/services/user.ts:45`
-2. Run `npm run build` locally to verify
-3. Try `/deploy` again
-
-### Rollback Available
-Previous version (v1.2.2) is still active.
-Run `/deploy rollback` if needed.
-```
+> Note: `desktop_client` is distributed as a standalone binary, not deployed via Docker.
 
 ---
 
 ## Platform Support
 
 | Platform | Command | Notes |
-|----------|---------|-------|
-| Vercel | `vercel --prod` | Auto-detected for Next.js |
-| Railway | `railway up` | Needs Railway CLI |
-| Fly.io | `fly deploy` | Needs flyctl |
-| Docker | `docker compose up -d` | For self-hosted |
-
----
-
-## Examples
-
-```
-/deploy
-/deploy check
-/deploy preview
-/deploy production --skip-tests
-/deploy rollback
-```
+|---|---|---|
+| Docker Compose | `docker compose up -d` | Primary method |
+| Kubernetes | Helm chart | For production scaling |
+| Cloud VMs | SSH + Docker | For staging |

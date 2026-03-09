@@ -1,8 +1,8 @@
 ---
-description: Debugging command. Activates DEBUG mode for systematic problem investigation.
+description: Debugging command for OpenDesk AI. Activates systematic 4-phase debugging across Rust, Go, Node.js, and Next.js services.
 ---
 
-# /debug - Systematic Problem Investigation
+# /debug - Systematic Debugging (OpenDesk AI)
 
 $ARGUMENTS
 
@@ -10,94 +10,67 @@ $ARGUMENTS
 
 ## Purpose
 
-This command activates DEBUG mode for systematic investigation of issues, errors, or unexpected behavior.
+Activate systematic debugging mode for the OpenDesk AI monorepo.
 
 ---
 
-## Behavior
+## Usage
 
-When `/debug` is triggered:
-
-1. **Gather information**
-   - Error message
-   - Reproduction steps
-   - Expected vs actual behavior
-   - Recent changes
-
-2. **Form hypotheses**
-   - List possible causes
-   - Order by likelihood
-
-3. **Investigate systematically**
-   - Test each hypothesis
-   - Check logs, data flow
-   - Use elimination method
-
-4. **Fix and prevent**
-   - Apply fix
-   - Explain root cause
-   - Add prevention measures
-
----
-
-## Output Format
-
-```markdown
-## 🔍 Debug: [Issue]
-
-### 1. Symptom
-[What's happening]
-
-### 2. Information Gathered
-- Error: `[error message]`
-- File: `[filepath]`
-- Line: [line number]
-
-### 3. Hypotheses
-1. ❓ [Most likely cause]
-2. ❓ [Second possibility]
-3. ❓ [Less likely cause]
-
-### 4. Investigation
-
-**Testing hypothesis 1:**
-[What I checked] → [Result]
-
-**Testing hypothesis 2:**
-[What I checked] → [Result]
-
-### 5. Root Cause
-🎯 **[Explanation of why this happened]**
-
-### 6. Fix
-```[language]
-// Before
-[broken code]
-
-// After
-[fixed code]
 ```
-
-### 7. Prevention
-🛡️ [How to prevent this in the future]
+/debug [description]    - Start debugging with issue description
+/debug [service]        - Debug a specific service (backend, frontend, gateway, client)
 ```
 
 ---
 
-## Examples
+## 4-Phase Methodology
 
-```
-/debug login not working
-/debug API returns 500
-/debug form doesn't submit
-/debug data not saving
-```
+### Phase 1: REPRODUCE
+- Which service is the issue in?
+- Can it be reproduced consistently?
+- Capture relevant logs
+
+### Phase 2: ISOLATE
+- Is it a single-service or cross-service issue?
+- Trace the data flow: Rust → Go → Node.js → Next.js
+- Check inter-service communication (WebSocket, Redis Pub/Sub, REST API)
+
+### Phase 3: FIX
+- Apply fix in the CORRECT service directory only
+- Respect microservice boundaries
+- Add a regression test
+
+### Phase 4: VERIFY
+- Run service tests to confirm fix
+- Verify cross-service communication if applicable
+- Confirm original issue is resolved
 
 ---
 
-## Key Principles
+## Common Debug Targets
 
-- **Ask before assuming** - get full error context
-- **Test hypotheses** - don't guess randomly
-- **Explain why** - not just what to fix
-- **Prevent recurrence** - add tests, validation
+| Issue | Service | Diagnostic Command |
+|---|---|---|
+| Screenshot not streaming | Rust / Go | Check WebSocket logs, screen capture thread |
+| AI stuck in loop | Node.js Backend | Check `actionHistory`, LLM responses |
+| Dashboard not updating | Next.js Frontend | Check SSE/WebSocket connection to backend |
+| Device offline | Go Gateway | Check connection pool, Redis Pub/Sub |
+| Scheduled task not firing | Node.js Backend | Check BullMQ worker, Redis connection |
+
+---
+
+## Diagnostic Commands
+
+```bash
+# Backend logs
+docker compose logs backend -f
+
+# Gateway logs
+docker compose logs gateway -f
+
+# Redis Pub/Sub monitor
+redis-cli monitor
+
+# MongoDB query inspection
+mongosh --eval "db.TaskLogs.find().sort({timestamp: -1}).limit(5)"
+```

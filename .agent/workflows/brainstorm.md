@@ -2,7 +2,7 @@
 description: Structured brainstorming for projects and features. Explores multiple options before implementation.
 ---
 
-# /brainstorm - Structured Idea Exploration
+# /brainstorm - Structured Brainstorming (OpenDesk AI)
 
 $ARGUMENTS
 
@@ -10,27 +10,49 @@ $ARGUMENTS
 
 ## Purpose
 
-This command activates BRAINSTORM mode for structured idea exploration. Use when you need to explore options before committing to an implementation.
+Explore multiple approaches before committing to implementation. Think broadly across the 4 OpenDesk AI services.
 
 ---
 
-## Behavior
+## Usage
 
-When `/brainstorm` is triggered:
+```
+/brainstorm [topic or feature]
+```
 
-1. **Understand the goal**
-   - What problem are we solving?
-   - Who is the user?
-   - What constraints exist?
+## Examples
 
-2. **Generate options**
-   - Provide at least 3 different approaches
-   - Each with pros and cons
-   - Consider unconventional solutions
+```
+/brainstorm How should we handle multi-monitor screen capture?
+/brainstorm What's the best approach for streaming screenshots to the dashboard?
+/brainstorm How to implement user persona embedding for RAG?
+```
 
-3. **Compare and recommend**
-   - Summarize tradeoffs
-   - Give a recommendation with reasoning
+---
+
+## Brainstorm Process
+
+### Step 1: Frame the Problem
+- What are we trying to solve?
+- Which service(s) are affected?
+- What are the constraints?
+
+### Step 2: Generate Options (Minimum 3)
+For each option:
+- **Approach**: Describe the solution
+- **Pros**: Benefits
+- **Cons**: Drawbacks
+- **Service Impact**: Which services need changes?
+- **Effort**: Low / Medium / High
+
+### Step 3: Evaluate
+- Compare against OpenDesk AI architecture constraints
+- Check microservice boundary compliance
+- Assess performance impact on the agentic loop
+
+### Step 4: Recommend
+- Present the recommended approach with rationale
+- Identify risks and mitigation strategies
 
 ---
 
@@ -39,75 +61,19 @@ When `/brainstorm` is triggered:
 ```markdown
 ## 🧠 Brainstorm: [Topic]
 
-### Context
-[Brief problem statement]
-
----
-
 ### Option A: [Name]
-[Description]
-
-✅ **Pros:**
-- [benefit 1]
-- [benefit 2]
-
-❌ **Cons:**
-- [drawback 1]
-
-📊 **Effort:** Low | Medium | High
-
----
+- **Approach**: ...
+- **Pros**: ...
+- **Cons**: ...
+- **Services**: /backend, /desktop_client
+- **Effort**: Medium
 
 ### Option B: [Name]
-[Description]
-
-✅ **Pros:**
-- [benefit 1]
-
-❌ **Cons:**
-- [drawback 1]
-- [drawback 2]
-
-📊 **Effort:** Low | Medium | High
-
----
+...
 
 ### Option C: [Name]
-[Description]
+...
 
-✅ **Pros:**
-- [benefit 1]
-
-❌ **Cons:**
-- [drawback 1]
-
-📊 **Effort:** Low | Medium | High
-
----
-
-## 💡 Recommendation
-
-**Option [X]** because [reasoning].
-
-What direction would you like to explore?
+### ✅ Recommendation: Option [X]
+**Reason**: [Why this option best fits OpenDesk AI architecture]
 ```
-
----
-
-## Examples
-
-```
-/brainstorm authentication system
-/brainstorm state management for complex form
-/brainstorm database schema for social app
-/brainstorm caching strategy
-```
-
----
-
-## Key Principles
-
-- **No code** - this is about ideas, not implementation
-- **Visual when helpful** - use diagrams for architecture
-- **Honest tradeoffs** - don't hide complexity
-- **Defer to user** - present options, let them decide

@@ -1,8 +1,8 @@
 ---
-description: Preview server start, stop, and status check. Local development server management.
+description: Preview server start, stop, and status check for OpenDesk AI multi-service development.
 ---
 
-# /preview - Preview Management
+# /preview - Multi-Service Preview (OpenDesk AI)
 
 $ARGUMENTS
 
@@ -10,33 +10,35 @@ $ARGUMENTS
 
 ## Task
 
-Manage preview server: start, stop, status check.
+Manage development servers across all OpenDesk AI services.
 
 ### Commands
 
 ```
-/preview           - Show current status
-/preview start     - Start server
-/preview stop      - Stop server
-/preview restart   - Restart
-/preview check     - Health check
+/preview           - Show status of all services
+/preview start     - Start all services (Docker Compose)
+/preview stop      - Stop all services
+/preview restart   - Restart all services
+/preview [service] - Start/check a specific service (backend, frontend, gateway)
 ```
 
 ---
 
 ## Usage Examples
 
-### Start Server
+### Start All Services
 ```
 /preview start
 
 Response:
-🚀 Starting preview...
-   Port: 3000
-   Type: Next.js
+🚀 Starting OpenDesk AI services...
+   📦 MongoDB: localhost:27017
+   📦 Redis: localhost:6379
+   🧠 Backend: http://localhost:3001
+   🌐 Gateway: ws://localhost:8080
+   🎨 Frontend: http://localhost:3000
 
-✅ Preview ready!
-   URL: http://localhost:3000
+✅ All services running!
 ```
 
 ### Status Check
@@ -44,38 +46,40 @@ Response:
 /preview
 
 Response:
-=== Preview Status ===
+=== OpenDesk AI Service Status ===
 
-🌐 URL: http://localhost:3000
-📁 Project: C:/projects/my-app
-🏷️ Type: nextjs
-💚 Health: OK
-```
-
-### Port Conflict
-```
-/preview start
-
-Response:
-⚠️ Port 3000 is in use.
-
-Options:
-1. Start on port 3001
-2. Close app on 3000
-3. Specify different port
-
-Which one? (default: 1)
+📦 MongoDB:  💚 Running (localhost:27017)
+📦 Redis:    💚 Running (localhost:6379)
+🧠 Backend:  💚 Running (localhost:3001)
+🌐 Gateway:  💚 Running (ws://localhost:8080)
+🎨 Frontend: 💚 Running (localhost:3000)
+🖥️ Client:   ⚪ Local (not in Docker)
 ```
 
 ---
 
 ## Technical
 
-Auto preview uses `auto_preview.py` script:
+Start services via Docker Compose:
 
 ```bash
-python .agent/scripts/auto_preview.py start [port]
-python .agent/scripts/auto_preview.py stop
-python .agent/scripts/auto_preview.py status
+docker compose up -d          # All services
+docker compose up backend -d  # Single service
+docker compose logs -f        # View logs
+docker compose down           # Stop all
 ```
 
+For local development without Docker:
+```bash
+# Backend
+cd backend && npm run dev
+
+# Frontend
+cd frontend && npm run dev
+
+# Gateway
+cd gateway && go run main.go
+
+# Desktop Client
+cd desktop_client && cargo run
+```

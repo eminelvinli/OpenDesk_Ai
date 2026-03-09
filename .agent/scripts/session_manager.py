@@ -1,120 +1,68 @@
 #!/usr/bin/env python3
 """
-Session Manager - Antigravity Kit
-=================================
-Analyzes project state, detects tech stack, tracks file statistics, and provides
-a summary of the current session.
+Session Manager - OpenDesk AI
+==============================
+
+Tracks which services are active and provides quick context
+for the AI coding agent about the current development session.
 
 Usage:
-    python .agent/scripts/session_manager.py status [path]
-    python .agent/scripts/session_manager.py info [path]
+    python .agent/scripts/session_manager.py .
 """
 
-import os
+import sys
 import json
-import argparse
 from pathlib import Path
-from typing import Dict, Any, List
+from datetime import datetime
 
-def get_project_root(path: str) -> Path:
-    return Path(path).resolve()
+class Colors:
+    GREEN = '\033[92m'
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    CYAN = '\033[96m'
+    BOLD = '\033[1m'
+    ENDC = '\033[0m'
 
-def analyze_package_json(root: Path) -> Dict[str, Any]:
-    pkg_file = root / "package.json"
-    if not pkg_file.exists():
-        return {"type": "unknown", "dependencies": {}}
-    
-    try:
-        with open(pkg_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            
-        deps = data.get("dependencies", {})
-        dev_deps = data.get("devDependencies", {})
-        all_deps = {**deps, **dev_deps}
-        
-        stack = []
-        if "next" in all_deps: stack.append("Next.js")
-        elif "react" in all_deps: stack.append("React")
-        elif "vue" in all_deps: stack.append("Vue")
-        elif "svelte" in all_deps: stack.append("Svelte")
-        elif "express" in all_deps: stack.append("Express")
-        elif "nestjs" in all_deps or "@nestjs/core" in all_deps: stack.append("NestJS")
-        
-        if "tailwindcss" in all_deps: stack.append("Tailwind CSS")
-        if "prisma" in all_deps: stack.append("Prisma")
-        if "typescript" in all_deps: stack.append("TypeScript")
-        
-        return {
-            "name": data.get("name", "unnamed"),
-            "version": data.get("version", "0.0.0"),
-            "stack": stack,
-            "scripts": list(data.get("scripts", {}).keys())
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-def count_files(root: Path) -> Dict[str, int]:
-    stats = {"created": 0, "modified": 0, "total": 0}
-    # Simple count for now, comprehensive tracking would require git diff or extensive history
-    exclude = {".git", "node_modules", ".next", "dist", "build", ".agent", ".gemini", "__pycache__"}
-    
-    for root_dir, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in exclude]
-        stats["total"] += len(files)
-        
-    return stats
-
-def detect_features(root: Path) -> List[str]:
-    # Heuristic: look at folder names in src/
-    features = []
-    src = root / "src"
-    if src.exists():
-        possible_dirs = ["components", "modules", "features", "app", "pages", "services"]
-        for d in possible_dirs:
-            p = src / d
-            if p.exists() and p.is_dir():
-                # List subdirectories as likely features
-                for child in p.iterdir():
-                    if child.is_dir():
-                        features.append(child.name)
-    return features[:10] # Limit to top 10
-
-def print_status(root: Path):
-    info = analyze_package_json(root)
-    stats = count_files(root)
-    features = detect_features(root)
-    
-    print("\n=== Project Status ===")
-    print(f"\n📁 Project: {info.get('name', root.name)}")
-    print(f"📂 Path: {root}")
-    print(f"🏷️  Type: {', '.join(info.get('stack', ['Generic']))}")
-    print(f"📊 Status: Active")
-    
-    print("\n🔧 Tech Stack:")
-    for tech in info.get('stack', []):
-        print(f"   • {tech}")
-        
-    print(f"\n✅ Detected Modules/Features ({len(features)}):")
-    for feat in features:
-        print(f"   • {feat}")
-    if not features:
-        print("   (No distinct feature modules detected)")
-        
-    print(f"\n📄 Files: {stats['total']} total files tracked")
-    print("\n====================\n")
+SERVICES = {
+    "desktop_client": {"lang": "Rust + Tauri", "config": "Cargo.toml", "subpath": "src-tauri"},
+    "gateway": {"lang": "Go", "config": "go.mod", "subpath": ""},
+    "backend": {"lang": "Node.js + TS", "config": "package.json", "subpath": ""},
+    "frontend": {"lang": "Next.js + TS", "config": "package.json", "subpath": ""},
+}
 
 def main():
-    parser = argparse.ArgumentParser(description="Session Manager")
-    parser.add_argument("command", choices=["status", "info"], help="Command to run")
-    parser.add_argument("path", nargs="?", default=".", help="Project path")
-    
-    args = parser.parse_args()
-    root = get_project_root(args.path)
-    
-    if args.command == "status":
-        print_status(root)
-    elif args.command == "info":
-        print(json.dumps(analyze_package_json(root), indent=2))
+    if len(sys.argv) < 2:
+        print("Usage: session_manager.py <project_root>")
+        sys.exit(1)
+
+    project = Path(sys.argv[1]).resolve()
+
+    print(f"{Colors.BOLD}{Colors.CYAN}🌐 OpenDesk AI - Session Info{Colors.ENDC}")
+    print(f"   Project: {project}")
+    print(f"   Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+    print(f"{Colors.BOLD}Services:{Colors.ENDC}")
+    for name, info in SERVICES.items():
+        svc_path = project / name
+        sub = svc_path / info["subpath"] if info["subpath"] else svc_path
+        config_path = sub / info["config"]
+
+        if config_path.exists():
+            print(f"  {Colors.GREEN}✅{Colors.ENDC} {name:20s} ({info['lang']})")
+        elif svc_path.exists():
+            print(f"  {Colors.YELLOW}⚠️{Colors.ENDC}  {name:20s} ({info['lang']}) - no {info['config']}")
+        else:
+            print(f"  {Colors.RED}❌{Colors.ENDC} {name:20s} ({info['lang']}) - directory missing")
+
+    # Check infrastructure
+    print(f"\n{Colors.BOLD}Infrastructure:{Colors.ENDC}")
+    compose = project / "docker-compose.yml"
+    if not compose.exists():
+        compose = project / "docker-compose.yaml"
+    print(f"  {'✅' if compose.exists() else '❌'} Docker Compose: {'found' if compose.exists() else 'not found'}")
+
+    env_file = project / ".env"
+    print(f"  {'✅' if env_file.exists() else '⚠️'}  .env file: {'found' if env_file.exists() else 'not found'}")
 
 if __name__ == "__main__":
     main()

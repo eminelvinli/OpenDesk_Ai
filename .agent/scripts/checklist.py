@@ -1,32 +1,28 @@
 #!/usr/bin/env python3
 """
-Master Checklist Runner - Antigravity Kit
-==========================================
+Master Checklist Runner - OpenDesk AI
+======================================
 
-Orchestrates all validation scripts in priority order.
-Use this for incremental validation during development.
+Orchestrates validation checks across all 4 microservices.
 
 Usage:
-    python scripts/checklist.py .                    # Run core checks
-    python scripts/checklist.py . --url <URL>        # Include performance checks
+    python .agent/scripts/checklist.py .              # Run all checks
+    python .agent/scripts/checklist.py . --service backend  # Single service
 
 Priority Order:
-    P0: Security Scan (vulnerabilities, secrets)
-    P1: Lint & Type Check (code quality)
-    P2: Schema Validation (if database exists)
-    P3: Test Runner (unit/integration tests)
-    P4: UX Audit (psychology laws, accessibility)
-    P5: SEO Check (meta tags, structure)
-    P6: Performance (lighthouse - requires URL)
+    P0: Security (no hardcoded secrets)
+    P1: Lint & Type Check (all services)
+    P2: Tests (all services)
+    P3: Build (compile/bundle check)
 """
 
 import sys
 import subprocess
 import argparse
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Optional
 
-# ANSI colors for terminal output
+# ANSI colors
 class Colors:
     HEADER = '\033[95m'
     BLUE = '\033[94m'
@@ -54,163 +50,144 @@ def print_warning(text: str):
 def print_error(text: str):
     print(f"{Colors.RED}❌ {text}{Colors.ENDC}")
 
-# Define priority-ordered checks
-CORE_CHECKS = [
-    ("Security Scan", ".agent/skills/vulnerability-scanner/scripts/security_scan.py", True),
-    ("Lint Check", ".agent/skills/lint-and-validate/scripts/lint_runner.py", True),
-    ("Schema Validation", ".agent/skills/database-design/scripts/schema_validator.py", False),
-    ("Test Runner", ".agent/skills/testing-patterns/scripts/test_runner.py", False),
-    ("UX Audit", ".agent/skills/frontend-design/scripts/ux_audit.py", False),
-    ("SEO Check", ".agent/skills/seo-fundamentals/scripts/seo_checker.py", False),
-]
+# Service definitions
+SERVICES = {
+    "backend": {
+        "path": "backend",
+        "language": "Node.js + TypeScript",
+        "checks": [
+            ("Security Scan", "grep -rn 'password\\|secret\\|api_key' --include='*.ts' --include='*.js' -l", False),
+            ("TypeScript Check", "npx tsc --noEmit", True),
+            ("Lint", "npm run lint", False),
+            ("Tests", "npm test", True),
+        ]
+    },
+    "frontend": {
+        "path": "frontend",
+        "language": "Next.js + TypeScript",
+        "checks": [
+            ("Security Scan", "grep -rn 'password\\|secret\\|api_key' --include='*.ts' --include='*.tsx' -l", False),
+            ("TypeScript Check", "npx tsc --noEmit", True),
+            ("Lint", "npm run lint", False),
+            ("Tests", "npm test", True),
+            ("Build", "npm run build", False),
+        ]
+    },
+    "gateway": {
+        "path": "gateway",
+        "language": "Go",
+        "checks": [
+            ("Go Vet", "go vet ./...", True),
+            ("Go Lint", "golangci-lint run", False),
+            ("Tests", "go test ./...", True),
+            ("Race Detection", "go test -race ./...", False),
+            ("Build", "go build ./...", True),
+        ]
+    },
+    "desktop_client": {
+        "path": "desktop_client/src-tauri",
+        "language": "Rust + Tauri",
+        "checks": [
+            ("Clippy", "cargo clippy -- -D warnings", True),
+            ("Format Check", "cargo fmt -- --check", False),
+            ("Tests", "cargo test", True),
+            ("Build", "cargo build", True),
+        ]
+    },
+}
 
-PERFORMANCE_CHECKS = [
-    ("Lighthouse Audit", ".agent/skills/performance-profiling/scripts/lighthouse_audit.py", True),
-    ("Playwright E2E", ".agent/skills/webapp-testing/scripts/playwright_runner.py", False),
-]
+def run_check(name: str, cmd: str, cwd: Path, required: bool) -> dict:
+    """Run a validation check and capture results."""
+    if not cwd.exists():
+        print_warning(f"{name}: Service directory not found ({cwd}), skipping")
+        return {"name": name, "passed": True, "skipped": True}
 
-def check_script_exists(script_path: Path) -> bool:
-    """Check if script file exists"""
-    return script_path.exists() and script_path.is_file()
-
-def run_script(name: str, script_path: Path, project_path: str, url: Optional[str] = None) -> dict:
-    """
-    Run a validation script and capture results
-    
-    Returns:
-        dict with keys: name, passed, output, skipped
-    """
-    if not check_script_exists(script_path):
-        print_warning(f"{name}: Script not found, skipping")
-        return {"name": name, "passed": True, "output": "", "skipped": True}
-    
     print_step(f"Running: {name}")
-    
-    # Build command
-    cmd = ["python", str(script_path), project_path]
-    if url and ("lighthouse" in script_path.name.lower() or "playwright" in script_path.name.lower()):
-        cmd.append(url)
-    
-    # Run script
+
     try:
         result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minute timeout
+            cmd, shell=True, capture_output=True, text=True,
+            timeout=300, cwd=str(cwd)
         )
-        
+
         passed = result.returncode == 0
-        
+
         if passed:
             print_success(f"{name}: PASSED")
         else:
             print_error(f"{name}: FAILED")
             if result.stderr:
                 print(f"  Error: {result.stderr[:200]}")
-        
-        return {
-            "name": name,
-            "passed": passed,
-            "output": result.stdout,
-            "error": result.stderr,
-            "skipped": False
-        }
-    
+
+        return {"name": name, "passed": passed, "skipped": False, "required": required}
+
     except subprocess.TimeoutExpired:
         print_error(f"{name}: TIMEOUT (>5 minutes)")
-        return {"name": name, "passed": False, "output": "", "error": "Timeout", "skipped": False}
-    
+        return {"name": name, "passed": False, "skipped": False, "required": required}
+
     except Exception as e:
         print_error(f"{name}: ERROR - {str(e)}")
-        return {"name": name, "passed": False, "output": "", "error": str(e), "skipped": False}
+        return {"name": name, "passed": False, "skipped": False, "required": required}
 
-def print_summary(results: List[dict]):
-    """Print final summary report"""
+def print_summary(results: List[dict]) -> bool:
+    """Print final summary report."""
     print_header("📊 CHECKLIST SUMMARY")
-    
-    passed_count = sum(1 for r in results if r["passed"] and not r.get("skipped"))
-    failed_count = sum(1 for r in results if not r["passed"] and not r.get("skipped"))
-    skipped_count = sum(1 for r in results if r.get("skipped"))
-    
-    print(f"Total Checks: {len(results)}")
-    print(f"{Colors.GREEN}✅ Passed: {passed_count}{Colors.ENDC}")
-    print(f"{Colors.RED}❌ Failed: {failed_count}{Colors.ENDC}")
-    print(f"{Colors.YELLOW}⏭️  Skipped: {skipped_count}{Colors.ENDC}")
+
+    passed = sum(1 for r in results if r["passed"] and not r.get("skipped"))
+    failed = sum(1 for r in results if not r["passed"] and not r.get("skipped"))
+    skipped = sum(1 for r in results if r.get("skipped"))
+
+    print(f"Total: {len(results)} | {Colors.GREEN}✅ {passed}{Colors.ENDC} | {Colors.RED}❌ {failed}{Colors.ENDC} | {Colors.YELLOW}⏭️ {skipped}{Colors.ENDC}")
     print()
-    
-    # Detailed results
+
     for r in results:
         if r.get("skipped"):
-            status = f"{Colors.YELLOW}⏭️ {Colors.ENDC}"
+            icon = f"{Colors.YELLOW}⏭️{Colors.ENDC}"
         elif r["passed"]:
-            status = f"{Colors.GREEN}✅{Colors.ENDC}"
+            icon = f"{Colors.GREEN}✅{Colors.ENDC}"
         else:
-            status = f"{Colors.RED}❌{Colors.ENDC}"
-        
-        print(f"{status} {r['name']}")
-    
+            icon = f"{Colors.RED}❌{Colors.ENDC}"
+        print(f"{icon} {r['name']}")
+
     print()
-    
-    if failed_count > 0:
-        print_error(f"{failed_count} check(s) FAILED - Please fix before proceeding")
+    if failed > 0:
+        print_error(f"{failed} check(s) FAILED")
         return False
     else:
         print_success("All checks PASSED ✨")
         return True
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Run Antigravity Kit validation checklist",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python scripts/checklist.py .                      # Core checks only
-  python scripts/checklist.py . --url http://localhost:7001  # Include performance
-        """
-    )
-    parser.add_argument("project", help="Project path to validate")
-    parser.add_argument("--url", help="URL for performance checks (lighthouse, playwright)")
-    parser.add_argument("--skip-performance", action="store_true", help="Skip performance checks even if URL provided")
-    
+    parser = argparse.ArgumentParser(description="OpenDesk AI - Master Checklist Runner")
+    parser.add_argument("project", help="Project root path")
+    parser.add_argument("--service", help="Run checks for a single service (backend, frontend, gateway, desktop_client)")
     args = parser.parse_args()
-    
+
     project_path = Path(args.project).resolve()
-    
     if not project_path.exists():
         print_error(f"Project path does not exist: {project_path}")
         sys.exit(1)
-    
-    print_header("🚀 ANTIGRAVITY KIT - MASTER CHECKLIST")
+
+    print_header("🌐 OPENDESK AI - MASTER CHECKLIST")
     print(f"Project: {project_path}")
-    print(f"URL: {args.url if args.url else 'Not provided (performance checks skipped)'}")
-    
+
+    services_to_check = {args.service: SERVICES[args.service]} if args.service else SERVICES
     results = []
-    
-    # Run core checks
-    print_header("📋 CORE CHECKS")
-    for name, script_path, required in CORE_CHECKS:
-        script = project_path / script_path
-        result = run_script(name, script, str(project_path))
-        results.append(result)
-        
-        # If required check fails, stop
-        if required and not result["passed"] and not result.get("skipped"):
-            print_error(f"CRITICAL: {name} failed. Stopping checklist.")
-            print_summary(results)
-            sys.exit(1)
-    
-    # Run performance checks if URL provided
-    if args.url and not args.skip_performance:
-        print_header("⚡ PERFORMANCE CHECKS")
-        for name, script_path, required in PERFORMANCE_CHECKS:
-            script = project_path / script_path
-            result = run_script(name, script, str(project_path), args.url)
+
+    for service_name, service_config in services_to_check.items():
+        service_path = project_path / service_config["path"]
+        print_header(f"📋 {service_name.upper()} ({service_config['language']})")
+
+        for check_name, cmd, required in service_config["checks"]:
+            result = run_check(f"[{service_name}] {check_name}", cmd, service_path, required)
             results.append(result)
-    
-    # Print summary
+
+            if required and not result["passed"] and not result.get("skipped"):
+                print_error(f"CRITICAL: {check_name} failed for {service_name}. Stopping.")
+                print_summary(results)
+                sys.exit(1)
+
     all_passed = print_summary(results)
-    
     sys.exit(0 if all_passed else 1)
 
 if __name__ == "__main__":

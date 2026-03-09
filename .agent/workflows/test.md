@@ -1,8 +1,8 @@
 ---
-description: Test generation and test running command. Creates and executes tests for code.
+description: Test generation and test running for all OpenDesk AI services (Rust, Go, Node.js, Next.js).
 ---
 
-# /test - Test Generation and Execution
+# /test - Multi-Service Testing (OpenDesk AI)
 
 $ARGUMENTS
 
@@ -10,135 +10,52 @@ $ARGUMENTS
 
 ## Purpose
 
-This command generates tests, runs existing tests, or checks test coverage.
+Generate or run tests across all 4 OpenDesk AI microservices.
 
 ---
 
 ## Sub-commands
 
 ```
-/test                - Run all tests
-/test [file/feature] - Generate tests for specific target
-/test coverage       - Show test coverage report
-/test watch          - Run tests in watch mode
+/test                   - Run all tests across all services
+/test [service]         - Run tests for a specific service (backend, frontend, gateway, client)
+/test [file/feature]    - Generate tests for specific target
+/test coverage          - Show coverage report per service
 ```
 
 ---
 
-## Behavior
+## Service Test Commands
 
-### Generate Tests
-
-When asked to test a file or feature:
-
-1. **Analyze the code**
-   - Identify functions and methods
-   - Find edge cases
-   - Detect dependencies to mock
-
-2. **Generate test cases**
-   - Happy path tests
-   - Error cases
-   - Edge cases
-   - Integration tests (if needed)
-
-3. **Write tests**
-   - Use project's test framework (Jest, Vitest, etc.)
-   - Follow existing test patterns
-   - Mock external dependencies
+| Service | Command | Framework |
+|---|---|---|
+| `/backend` | `cd backend && npm test` | Jest + Supertest |
+| `/frontend` | `cd frontend && npm test` | React Testing Library |
+| `/frontend` (E2E) | `cd frontend && npx playwright test` | Playwright |
+| `/gateway` | `cd gateway && go test ./...` | Go testing (table-driven) |
+| `/desktop_client` | `cd desktop_client && cargo test` | Rust #[cfg(test)] |
 
 ---
 
-## Output Format
+## Run All Tests
 
-### For Test Generation
-
-```markdown
-## 🧪 Tests: [Target]
-
-### Test Plan
-| Test Case | Type | Coverage |
-|-----------|------|----------|
-| Should create user | Unit | Happy path |
-| Should reject invalid email | Unit | Validation |
-| Should handle db error | Unit | Error case |
-
-### Generated Tests
-
-`tests/[file].test.ts`
-
-[Code block with tests]
-
----
-
-Run with: `npm test`
-```
-
-### For Test Execution
-
-```
-🧪 Running tests...
-
-✅ auth.test.ts (5 passed)
-✅ user.test.ts (8 passed)
-❌ order.test.ts (2 passed, 1 failed)
-
-Failed:
-  ✗ should calculate total with discount
-    Expected: 90
-    Received: 100
-
-Total: 15 tests (14 passed, 1 failed)
-```
-
----
-
-## Examples
-
-```
-/test src/services/auth.service.ts
-/test user registration flow
-/test coverage
-/test fix failed tests
-```
-
----
-
-## Test Patterns
-
-### Unit Test Structure
-
-```typescript
-describe('AuthService', () => {
-  describe('login', () => {
-    it('should return token for valid credentials', async () => {
-      // Arrange
-      const credentials = { email: 'test@test.com', password: 'pass123' };
-      
-      // Act
-      const result = await authService.login(credentials);
-      
-      // Assert
-      expect(result.token).toBeDefined();
-    });
-
-    it('should throw for invalid password', async () => {
-      // Arrange
-      const credentials = { email: 'test@test.com', password: 'wrong' };
-      
-      // Act & Assert
-      await expect(authService.login(credentials)).rejects.toThrow('Invalid credentials');
-    });
-  });
-});
+```bash
+# Backend
+(cd backend && npm test) &&
+# Frontend
+(cd frontend && npm test) &&
+# Gateway
+(cd gateway && go test ./...) &&
+# Desktop Client
+(cd desktop_client/src-tauri && cargo test)
 ```
 
 ---
 
 ## Key Principles
 
-- **Test behavior not implementation**
-- **One assertion per test** (when practical)
-- **Descriptive test names**
-- **Arrange-Act-Assert pattern**
-- **Mock external dependencies**
+- **Test behavior, not implementation**
+- **AAA Pattern** (Arrange, Act, Assert)
+- **Mock external dependencies** (LLM APIs, OS APIs, databases)
+- **Minimum 80% coverage** per service
+- **Race detection** for Go: `go test -race ./...`

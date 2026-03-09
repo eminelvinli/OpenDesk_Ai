@@ -2,58 +2,50 @@
 description: Create new application command. Triggers App Builder skill and starts interactive dialogue with user.
 ---
 
-# /create - Create Application
+# /create - Create New Service Component (OpenDesk AI)
 
 $ARGUMENTS
 
 ---
 
-## Task
+## Purpose
 
-This command starts a new application creation process.
-
-### Steps:
-
-1. **Request Analysis**
-   - Understand what the user wants
-   - If information is missing, use `conversation-manager` skill to ask
-
-2. **Project Planning**
-   - Use `project-planner` agent for task breakdown
-   - Determine tech stack
-   - Plan file structure
-   - Create plan file and proceed to building
-
-3. **Application Building (After Approval)**
-   - Orchestrate with `app-builder` skill
-   - Coordinate expert agents:
-     - `database-architect` → Schema
-     - `backend-specialist` → API
-     - `frontend-specialist` → UI
-
-4. **Preview**
-   - Start with `auto_preview.py` when complete
-   - Present URL to user
+Scaffold a new module, feature, or component within one of the 4 OpenDesk AI services.
 
 ---
 
-## Usage Examples
+## Usage
 
 ```
-/create blog site
-/create e-commerce app with product listing and cart
-/create todo app
-/create Instagram clone
-/create crm system with customer management
+/create [component] in [service]
+```
+
+## Examples
+
+```
+/create new API endpoint in backend
+/create screen capture module in desktop_client
+/create device list page in frontend
+/create redis pubsub handler in gateway
 ```
 
 ---
 
-## Before Starting
+## Flow
 
-If request is unclear, ask these questions:
-- What type of application?
-- What are the basic features?
-- Who will use it?
+1. **Identify service** → Which of the 4 services?
+2. **Clarify scope** → Ask 2-3 questions about requirements
+3. **Create plan** → Generate `{task-slug}.md` with task breakdown
+4. **Route** → Hand off to the correct specialist agent
+5. **Implement** → Build with tests and documentation
 
-Use defaults, add details later.
+## Service Routing
+
+| Target | Agent |
+|---|---|
+| `/desktop_client` | `rust-specialist` |
+| `/gateway` | `go-specialist` |
+| `/backend` | `backend-specialist` |
+| `/frontend` | `frontend-specialist` |
+
+> 🔴 **Always create a plan file before writing code for complex components.**
