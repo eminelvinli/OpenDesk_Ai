@@ -1,6 +1,6 @@
-# Data Access Layer (AppDataCo)
+# Data Access Layer (OpenDesk AI)
 
-> **PROJECT CONTEXT:** MongoDB uses Mongoose, ClickHouse uses raw client.
+> **PROJECT CONTEXT:** MongoDB uses Mongoose, Redis uses ioredis/BullMQ.
 
 ## Data Access Patterns
 
@@ -16,50 +16,59 @@ What database?
 │   ├── Virtuals
 │   └── Aggregate pipelines
 │
-└── ClickHouse
-    └── @clickhouse/client (raw queries)
+├── MongoDB Atlas Vector Search
+│   └── mongodb native driver
+│   │
+│   Features:
+│   ├── Semantic similarity search
+│   ├── Embedding storage
+│   └── RAG persona retrieval
+│
+└── Redis
+    └── ioredis + BullMQ
     │
     Features:
-    ├── Raw SQL queries
-    ├── Parameterized queries
-    └── Defensive result parsing
+    ├── Job queues (BullMQ)
+    ├── Pub/Sub messaging
+    └── Session/state caching
 ```
 
 ## Mongoose Patterns
 
 ```javascript
 // Model definition
-const AppSchema = new Schema({
-  app_id: { type: String, required: true, index: true },
-  store: { type: String, enum: ['google', 'apple'] },
-  metadata: { type: Object }
+const DeviceSchema = new Schema({
+  deviceId: { type: String, required: true, unique: true, index: true },
+  userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  osType: { type: String, enum: ['windows', 'macos', 'linux'] },
+  screenBounds: { width: Number, height: Number },
+  lastSeen: { type: Date, default: Date.now }
 });
 
 // Query
-const app = await App.findOne({ app_id }).lean();
+const device = await Device.findOne({ deviceId }).lean();
 ```
 
-## ClickHouse Patterns
+## Vector Search Patterns
 
 ```javascript
-// Defensive parsing (CRITICAL)
-const result = await clickhouse.query({
-  query: 'SELECT * FROM rankings WHERE app_id = {appId:String}',
-  query_params: { appId }
-});
-const data = await result.json();
-const rows = Array.isArray(data) ? data : data.data; // Defensive!
-
-// Mutations (must wait for completion)
-await clickhouse.command({
-  query: `ALTER TABLE rankings DELETE WHERE job_id = '${jobId}'`
-});
-// Wait for mutation to complete before proceeding
+// Semantic search for RAG persona
+const results = await collection.aggregate([
+  {
+    $vectorSearch: {
+      queryVector: embedding,
+      path: "embedding",
+      numCandidates: 100,
+      limit: 5,
+      index: "persona_index"
+    }
+  }
+]).toArray();
 ```
 
 ## Anti-Patterns
 
-❌ Using Prisma/Drizzle (not installed)
-❌ Skipping defensive parsing for ClickHouse
-❌ Mixing state data into ClickHouse
-❌ Storing time-series in MongoDB
+❌ Using Prisma/Drizzle (not in this project)
+❌ Storing permanent data in Redis (use MongoDB)
+❌ Skipping Mongoose schema validation
+❌ Raw MongoDB queries when Mongoose suffices
