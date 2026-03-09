@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/opendesk-ai/gateway/internal/pubsub"
 	ws "github.com/opendesk-ai/gateway/internal/websocket"
 )
 
@@ -23,6 +25,18 @@ func main() {
 	}
 
 	hub := ws.NewHub()
+
+	// Start Redis Pub/Sub subscriber in background.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	redisSub := pubsub.NewSubscriber(hub)
+	if err := redisSub.Ping(ctx); err != nil {
+		log.Printf("⚠️  Redis not available: %v (commands will not be routed until Redis is up)", err)
+	} else {
+		log.Println("✅ Redis connected")
+	}
+	go redisSub.Listen(ctx)
 
 	mux := http.NewServeMux()
 
@@ -50,6 +64,7 @@ func main() {
 	go func() {
 		<-quit
 		log.Println("🛑 Shutting down gateway...")
+		cancel() // Stop Redis subscriber.
 		server.Close()
 	}()
 
