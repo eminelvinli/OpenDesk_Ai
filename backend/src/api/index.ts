@@ -7,9 +7,10 @@
 
 import { Router, Request, Response } from 'express';
 import { publishCommand, AgentCommandEnvelope } from '../jobs/redis';
-import { enqueueTask } from '../jobs/queue';
+import { enqueueTask, cancelTaskForDevice } from '../jobs/queue';
 import { TaskLog, Device } from '../db';
-import { AgentActionType } from '../types';
+import { AgentActionType, DeviceObservationPayload } from '../types';
+import { pushObservation, pushAgentStatus } from './stream';
 
 const router = Router();
 
@@ -148,5 +149,70 @@ router.post('/tasks/schedule', async (req: Request, res: Response): Promise<void
     }
 });
 
-export default router;
+/**
+ * POST /api/observations/:deviceId
+ *
+ * Receives DeviceObservationPayload from the Rust desktop client.
+ * Handles both normal observations (forwarded to SSE stream) and
+ * "interrupted" status payloads (kill switch or mouse override).
+ *
+ * On interrupt: cancels the active BullMQ job, marks TaskLog as paused,
+ * and pushes an agent_status SSE event so the frontend UI updates immediately.
+ *
+ * Body: DeviceObservationPayload (with optional `status` field)
+ */
+router.post(
+    '/observations/:deviceId',
+    async (req: Request<{ deviceId: string }>, res: Response): Promise<void> => {
+        const deviceId = req.params.deviceId;
+        const body = req.body as DeviceObservationPayload & { status?: string };
 
+        if (!deviceId) {
+            res.status(400).json({ error: 'Missing deviceId' });
+            return;
+        }
+
+        try {
+            // Check if this is an interrupted signal from the kill switch or mouse override.
+            if (body.status && body.status.startsWith('interrupted:')) {
+                const reason = body.status.replace('interrupted:', '');
+                console.log(`🔴 Interrupted signal from ${deviceId}: ${reason}`);
+
+                // Cancel the active job and mark TaskLog as paused.
+                const cancelled = await cancelTaskForDevice(deviceId);
+
+                // Push SSE status update so the frontend reacts immediately.
+                pushAgentStatus(deviceId, {
+                    state: 'interrupted',
+                    action: reason,
+                    iteration: 0,
+                });
+
+                res.json({
+                    status: 'ok',
+                    interrupted: true,
+                    reason,
+                    jobCancelled: cancelled,
+                });
+                return;
+            }
+
+            // Normal observation — forward to SSE stream for live view.
+            if (body.screenBase64) {
+                pushObservation({
+                    deviceId,
+                    timestamp: body.timestamp,
+                    screenBase64: body.screenBase64,
+                    screenBounds: body.screenBounds,
+                });
+            }
+
+            res.json({ status: 'ok' });
+        } catch (err) {
+            console.error(`❌ Failed to process observation from ${deviceId}:`, err);
+            res.status(500).json({ error: 'Failed to process observation' });
+        }
+    }
+);
+
+export default router;

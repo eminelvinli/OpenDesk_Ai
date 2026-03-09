@@ -1,0 +1,26 @@
+{
+    "name": "opendesk-ai",
+    "version": "0.1.0",
+    "description": "OpenDesk AI — Autonomous desktop operator monorepo",
+    "private": true,
+    "scripts": {
+        "infrastructure:up": "docker compose up -d",
+        "infrastructure:down": "docker compose down",
+        "infrastructure:logs": "docker compose logs -f",
+        "setup": "npm install && cd backend && npm install && cd ../frontend && npm install",
+        "dev:backend": "cd backend && npm run dev",
+        "dev:frontend": "cd frontend && npm run dev",
+        "dev:gateway": "cd gateway && sh -c 'set -a && [ -f .env ] && . .env && set +a && go run ./cmd/server/'",
+        "dev:all": "concurrently --kill-others-on-fail --prefix-colors \"bgBlue.bold,bgGreen.bold,bgMagenta.bold\" --names \"BACKEND ,FRONTEND,GATEWAY \" \"npm run dev:backend\" \"npm run dev:frontend\" \"npm run dev:gateway\"",
+        "build:backend": "cd backend && npm run build",
+        "build:frontend": "cd frontend && npm run build",
+        "test:backend": "cd backend && npm test",
+        "test:frontend": "cd frontend && npm test"
+    },
+    "devDependencies": {
+        "concurrently": "^9.1.0"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    }
+}

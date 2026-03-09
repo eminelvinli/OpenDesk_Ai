@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import apiRouter from './api';
+import authRouter from './api/auth';
 import streamRouter from './api/stream';
 import { connectRedis, disconnectRedis } from './jobs/redis';
 import { closeQueue } from './jobs/queue';
@@ -20,6 +21,7 @@ app.use(express.json({ limit: '10mb' }));
 
 /** API routes */
 app.use('/api', apiRouter);
+app.use('/api', authRouter);
 app.use('/api', streamRouter);
 
 /** Health check endpoint */

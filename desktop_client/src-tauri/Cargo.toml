@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 # Tauri framework
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
+tauri-plugin-notification = "2"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -34,6 +35,9 @@ enigo = { version = "0.3", features = ["serde"] }
 # Fast screen capturing
 xcap = "0.2"
 
+# Global hotkey listener for the kill switch (Ctrl+Alt+K)
+rdev = "0.5"
+
 # Logging
 log = "0.4"
 env_logger = "0.11"
@@ -43,3 +47,4 @@ base64 = "0.22"
 
 # Image compression (JPEG encoding before Base64)
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+

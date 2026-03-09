@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+target/
+
+# Environment files (never commit real keys)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Rust
+desktop_client/src-tauri/target/
+
+# Go
+gateway/bin/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+docker-volumes/
+
+# IDE
+.vscode/
+.idea/
+*.swp

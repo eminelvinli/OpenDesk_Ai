@@ -23,12 +23,10 @@ import {
     TaskState,
     ScreenBounds,
 } from '../types';
-import {
-    AGENT_SYSTEM_PROMPT,
-    buildUserMessage,
-    formatActionHistory,
-} from './prompts';
+import { callVisionLLMWithRetry } from './llm';
 import { injectPersonaContext } from '../memory/rag';
+import { TaskLogger, createTaskLogger, generateTraceId } from '../utils/logger';
+import { pushAgentStatus } from '../api/stream';
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -75,37 +73,8 @@ export class InvalidLLMOutputError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// LLM Provider (Mock)
+// LLM Provider — Real Vision LLM via OpenAI (see agent/llm.ts)
 // ---------------------------------------------------------------------------
-
-/**
- * Simulate a Vision LLM call. In production, this will call OpenAI, Anthropic,
- * or a local model with the screenshot + system prompt.
- *
- * @param _systemPrompt - The system instruction (unused in mock).
- * @param _userMessage - The user message with goal and history (unused in mock).
- * @param _screenshotBase64 - The current screenshot (unused in mock).
- * @returns A mock AgentActionCommand JSON string.
- */
-async function callVisionLLM(
-    _systemPrompt: string,
-    _userMessage: string,
-    _screenshotBase64: string
-): Promise<string> {
-    // TODO: Replace with real LLM provider integration.
-    // Simulate some processing time.
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    // Return a dummy action for testing the loop mechanics.
-    const mockResponse: AgentActionCommand = {
-        action: 'mouse_click',
-        coordinates: { x: 500, y: 300 },
-        text: null,
-        key: null,
-    };
-
-    return JSON.stringify(mockResponse);
-}
 
 // ---------------------------------------------------------------------------
 // Output Parsing
@@ -263,10 +232,10 @@ const DEFAULT_MAX_ITERATIONS = 50;
  * Evaluate the next action to take based on the current observation.
  *
  * This is the core Think step of the ReAct loop:
- * 1. Build the LLM prompt with goal, history, and persona context.
- * 2. Call the Vision LLM with the current screenshot.
- * 3. Parse and validate the structured JSON output.
- * 4. Validate coordinates against screen bounds.
+ * 1. Call the Vision LLM with screenshot, goal, history, persona.
+ * 2. LLM returns zod-validated structured JSON (AgentActionCommand).
+ * 3. Validate coordinates against screen bounds.
+ * 4. Automatic retry with exponential backoff on transient errors.
  *
  * @param observation - The current screenshot and device metadata.
  * @param history - Array of all previous actions in this session.
@@ -278,32 +247,30 @@ export async function evaluateNextStep(
     observation: DeviceObservationPayload,
     history: ActionHistoryEntry[],
     goal: string,
-    personaRules?: string
-): Promise<{ command: AgentActionCommand; reasoning: string }> {
-    // Build the prompt context with persona rules.
-    const formattedHistory = formatActionHistory(
-        history.map((e) => ({
-            action: e.action.action,
-            coordinates: e.action.coordinates,
-            text: e.action.text,
-            key: e.action.key,
-            reasoning: e.reasoning,
-        }))
-    );
-    const userMessage = buildUserMessage(goal, formattedHistory, personaRules);
-
-    // Call the Vision LLM.
-    const rawOutput = await callVisionLLM(
-        AGENT_SYSTEM_PROMPT,
-        userMessage,
-        observation.screenBase64
+    personaRules?: string,
+    log?: TaskLogger
+): Promise<{ command: AgentActionCommand; reasoning: string; tokenUsage: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
+    const { command, rawOutput, tokenUsage } = await callVisionLLMWithRetry(
+        observation.screenBase64,
+        goal,
+        history,
+        observation.screenBounds,
+        personaRules,
+        log
     );
 
-    // Parse and validate the response.
-    const command = parseLLMOutput(rawOutput);
+    // Double-check coordinates are within screen bounds (zero-trust).
     validateCoordinates(command, observation.screenBounds);
 
-    return { command, reasoning: rawOutput };
+    return {
+        command,
+        reasoning: rawOutput,
+        tokenUsage: {
+            promptTokens: tokenUsage.promptTokens,
+            completionTokens: tokenUsage.completionTokens,
+            totalTokens: tokenUsage.totalTokens,
+        },
+    };
 }
 
 /**
@@ -325,36 +292,101 @@ export async function evaluateNextStep(
 export async function runAgenticLoop(
     task: TaskState,
     getObservation: () => Promise<DeviceObservationPayload>,
-    dispatchAction: (command: AgentActionCommand) => Promise<void>
+    dispatchAction: (command: AgentActionCommand) => Promise<void>,
+    existingLog?: TaskLogger
 ): Promise<TaskState> {
     const maxIterations = task.maxIterations || DEFAULT_MAX_ITERATIONS;
     const history: ActionHistoryEntry[] = [...task.actionHistory];
     let iteration = task.iterationCount;
 
-    console.log(`🤖 Starting agentic loop for task: "${task.goal}" (device: ${task.deviceId})`);
+    // Create or reuse a task-scoped logger with a stable traceId.
+    const traceId = (task as TaskState & { traceId?: string }).traceId || generateTraceId();
+    const log = existingLog ?? createTaskLogger(traceId, task.deviceId);
+
+    // Accumulate token usage across all iterations.
+    let totalPromptTokens = 0;
+    let totalCompletionTokens = 0;
+    let totalTokens = 0;
+
+    log.info(`[Agent] Starting agentic loop`, {
+        goal: task.goal,
+        deviceId: task.deviceId,
+        traceId,
+        maxIterations,
+    });
 
     // RAG: Fetch persona context once before the loop starts.
     const personaRules = await injectPersonaContext(task.userId, task.goal);
     if (personaRules) {
-        console.log(`🧠 Persona context loaded for user ${task.userId}`);
+        log.info(`[Agent] Persona context loaded`, { userId: task.userId });
     }
 
     while (iteration < maxIterations) {
         iteration++;
-        console.log(`\n--- Iteration ${iteration}/${maxIterations} ---`);
+        log.info(`[Agent] --- Iteration ${iteration}/${maxIterations} ---`, { iteration });
+
+        pushAgentStatus(task.deviceId, { state: 'running', iteration });
 
         // OBSERVE: Get current screenshot from the Rust client.
-        const observation = await getObservation();
-        console.log(`📸 Observation received from ${observation.deviceId}`);
+        let observation: DeviceObservationPayload;
+        try {
+            observation = await getObservation();
+            log.info(`[Agent] Observation received`, {
+                deviceId: observation.deviceId,
+                bounds: `${observation.screenBounds.width}x${observation.screenBounds.height}`,
+            });
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : 'Unknown observation error';
+            log.error('[Agent] Failed to receive observation — device likely disconnected', {
+                error: errorMsg,
+                stack: err instanceof Error ? err.stack : undefined,
+            });
+            pushAgentStatus(task.deviceId, { state: 'error', action: `Error: ${errorMsg}` });
+            return {
+                ...task,
+                status: 'failed',
+                actionHistory: history,
+                iterationCount: iteration,
+                errorMessage: `Failed to receive observation: ${errorMsg}`,
+                updatedAt: new Date(),
+            };
+        }
 
-        // THINK: Ask the Vision LLM what to do next (with persona context).
-        const { command, reasoning } = await evaluateNextStep(
-            observation,
-            history,
-            task.goal,
-            personaRules
-        );
-        console.log(`🧠 LLM decided: ${command.action}`, command.coordinates || '');
+        // THINK: Ask the Vision LLM what to do next.
+        let command: AgentActionCommand;
+        let reasoning: string;
+        try {
+            const result = await evaluateNextStep(
+                observation,
+                history,
+                task.goal,
+                personaRules,
+                log
+            );
+            command = result.command;
+            reasoning = result.reasoning;
+
+            // Accumulate token usage.
+            totalPromptTokens += result.tokenUsage.promptTokens;
+            totalCompletionTokens += result.tokenUsage.completionTokens;
+            totalTokens += result.tokenUsage.totalTokens;
+        } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : 'Unknown LLM error';
+            log.error('[Agent] LLM evaluation failed — terminating loop', {
+                error: errorMsg,
+                stack: err instanceof Error ? err.stack : undefined,
+                iteration,
+            });
+            pushAgentStatus(task.deviceId, { state: 'error', action: `Error: ${errorMsg}` });
+            return {
+                ...task,
+                status: 'failed',
+                actionHistory: history,
+                iterationCount: iteration,
+                errorMessage: `LLM error: ${errorMsg}`,
+                updatedAt: new Date(),
+            };
+        }
 
         // Record in history.
         const entry: ActionHistoryEntry = {
@@ -369,7 +401,12 @@ export async function runAgenticLoop(
         const stuckCoords = detectStuck(history);
         if (stuckCoords) {
             const error = new StuckExecutionError(task.deviceId, stuckCoords, iteration);
-            console.error(`🔴 ${error.message}`);
+            log.error(`[Agent] Stuck execution detected`, {
+                coordinates: stuckCoords,
+                iteration,
+                error: error.message,
+            });
+            pushAgentStatus(task.deviceId, { state: 'error', action: 'Stuck: same coordinates 3x' });
             return {
                 ...task,
                 status: 'stuck',
@@ -382,7 +419,8 @@ export async function runAgenticLoop(
 
         // DONE: Did the LLM signal task completion?
         if (command.action === 'done') {
-            console.log(`✅ Task completed at iteration ${iteration}`);
+            log.info(`[Agent] Task completed!`, { iteration, totalTokens, totalPromptTokens, totalCompletionTokens });
+            pushAgentStatus(task.deviceId, { state: 'completed', iteration });
             return {
                 ...task,
                 status: 'completed',
@@ -396,10 +434,18 @@ export async function runAgenticLoop(
         // ACT: Dispatch the command to the Rust client.
         try {
             await dispatchAction(command);
-            console.log(`📤 Action dispatched: ${command.action}`);
+            log.info(`[Agent] Action dispatched: ${command.action}`, {
+                action: command.action,
+                coordinates: command.coordinates,
+            });
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : 'Unknown dispatch error';
-            console.error(`❌ Dispatch failed: ${errorMsg}`);
+            log.error('[Agent] Failed to dispatch action — device may have disconnected', {
+                error: errorMsg,
+                stack: err instanceof Error ? err.stack : undefined,
+                action: command.action,
+            });
+            pushAgentStatus(task.deviceId, { state: 'error', action: `Dispatch error: ${errorMsg}` });
             return {
                 ...task,
                 status: 'failed',
@@ -413,7 +459,12 @@ export async function runAgenticLoop(
 
     // Max iterations reached.
     const error = new MaxIterationsError(task.deviceId, maxIterations);
-    console.error(`🔴 ${error.message}`);
+    log.error(`[Agent] Max iterations reached`, {
+        maxIterations,
+        iteration,
+        totalTokens,
+    });
+    pushAgentStatus(task.deviceId, { state: 'error', action: `Max iterations (${maxIterations}) reached` });
     return {
         ...task,
         status: 'failed',

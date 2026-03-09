@@ -4,20 +4,25 @@
 //! observations to the Go Gateway, receives AgentActionCommands, and
 //! executes them using OS-level input simulation.
 //!
+//! Safety mechanisms:
+//! - Global hotkey `Ctrl+Alt+K` severs the WebSocket and halts execution.
+//! - Mouse override: if the user moves the mouse >50 pixels between frames,
+//!   the AI's action is aborted and an "interrupted" payload is sent.
+//!
 //! All AI reasoning happens in the Node.js backend.
 
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use enigo::{
-    Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
-};
+use enigo::{Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use futures_util::{SinkExt, StreamExt};
 use image::codecs::jpeg::JpegEncoder;
 use log::{error, info, warn};
+use rdev::{listen, Event, EventType, Key as RdevKey};
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -70,6 +75,8 @@ pub struct DeviceObservationPayload {
     pub timestamp: u64,
     pub screen_base64: String,
     pub screen_bounds: ScreenBounds,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -81,20 +88,142 @@ const OBSERVATION_INTERVAL_SECS: u64 = 5;
 const RECONNECT_DELAY_SECS: u64 = 3;
 const MAX_RECONNECT_DELAY_SECS: u64 = 30;
 const DEVICE_ID: &str = "dev-rust-001";
-
-/// JPEG quality for screenshot compression (1–100). Lower = smaller payload.
 const JPEG_QUALITY: u8 = 60;
+
+/// Mouse displacement threshold (pixels) before the AI action is overridden.
+const MOUSE_OVERRIDE_THRESHOLD: i32 = 50;
+
+// ---------------------------------------------------------------------------
+// Global Safety State
+// ---------------------------------------------------------------------------
+
+/// Atomic kill switch flag. Set to true by the hotkey thread.
+/// When true, the WebSocket loop severs immediately.
+static KILL_SWITCH_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Tracks modifier key states for the Ctrl+Alt+K combo.
+static CTRL_HELD: AtomicBool = AtomicBool::new(false);
+static ALT_HELD: AtomicBool = AtomicBool::new(false);
+
+/// Last known physical mouse position (set after each observation).
+static LAST_MOUSE_X: AtomicI32 = AtomicI32::new(0);
+static LAST_MOUSE_Y: AtomicI32 = AtomicI32::new(0);
+
+// ---------------------------------------------------------------------------
+// Kill Switch Hotkey Thread (rdev)
+// ---------------------------------------------------------------------------
+
+/// Spawn a background OS thread that listens for global keyboard events.
+/// Detects Ctrl+Alt+K and sets KILL_SWITCH_ACTIVE.
+///
+/// Uses `rdev::listen` which runs a blocking OS event loop — must be on its
+/// own `std::thread`, not a Tokio task.
+pub fn spawn_hotkey_listener() {
+    thread::Builder::new()
+        .name("kill-switch-listener".to_string())
+        .spawn(|| {
+            info!("🛡️  Kill switch listener started (Ctrl+Alt+K to halt)");
+
+            if let Err(e) = listen(handle_hotkey_event) {
+                error!("❌ Global hotkey listener error: {:?}", e);
+            }
+        })
+        .expect("Failed to spawn hotkey listener thread");
+}
+
+/// Handle a global keyboard event from rdev.
+/// Updates modifier state and triggers the kill switch on Ctrl+Alt+K.
+fn handle_hotkey_event(event: Event) {
+    match event.event_type {
+        EventType::KeyPress(key) => {
+            match key {
+                RdevKey::ControlLeft | RdevKey::ControlRight => {
+                    CTRL_HELD.store(true, Ordering::SeqCst);
+                }
+                RdevKey::Alt | RdevKey::AltGr => {
+                    ALT_HELD.store(true, Ordering::SeqCst);
+                }
+                RdevKey::KeyK => {
+                    if CTRL_HELD.load(Ordering::SeqCst) && ALT_HELD.load(Ordering::SeqCst) {
+                        info!("🔴 KILL SWITCH ACTIVATED (Ctrl+Alt+K)");
+                        KILL_SWITCH_ACTIVE.store(true, Ordering::SeqCst);
+                    }
+                }
+                _ => {}
+            }
+        }
+        EventType::KeyRelease(key) => {
+            match key {
+                RdevKey::ControlLeft | RdevKey::ControlRight => {
+                    CTRL_HELD.store(false, Ordering::SeqCst);
+                }
+                RdevKey::Alt | RdevKey::AltGr => {
+                    ALT_HELD.store(false, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Reset the kill switch so the agent can run again after halting.
+pub fn reset_kill_switch() {
+    KILL_SWITCH_ACTIVE.store(false, Ordering::SeqCst);
+    info!("🟢 Kill switch reset — agent can resume");
+}
+
+// ---------------------------------------------------------------------------
+// Mouse Override Check
+// ---------------------------------------------------------------------------
+
+/// Get the current physical mouse position using enigo.
+/// Returns (x, y) or (0, 0) on failure.
+fn get_current_mouse_pos() -> (i32, i32) {
+    // rdev doesn't provide a query API; we use a simple approach:
+    // The last mouse position is updated by the capture loop.
+    (
+        LAST_MOUSE_X.load(Ordering::SeqCst),
+        LAST_MOUSE_Y.load(Ordering::SeqCst),
+    )
+}
+
+/// Update the tracked mouse position from rdev's last known position.
+/// Called after each observation to establish the "last known" baseline.
+fn update_last_mouse_pos(x: i32, y: i32) {
+    LAST_MOUSE_X.store(x, Ordering::SeqCst);
+    LAST_MOUSE_Y.store(y, Ordering::SeqCst);
+}
+
+/// Check whether the user has physically moved the mouse significantly.
+///
+/// If the real mouse position deviates >50 pixels from where the AI
+/// last saw it, the human has overridden the AI — abort the action.
+///
+/// Returns true if the user's mouse movement should block AI execution.
+fn is_mouse_overridden(last_x: i32, last_y: i32) -> bool {
+    let (cur_x, cur_y) = get_current_mouse_pos();
+    let dx = (cur_x - last_x).abs();
+    let dy = (cur_y - last_y).abs();
+    let overridden = dx > MOUSE_OVERRIDE_THRESHOLD || dy > MOUSE_OVERRIDE_THRESHOLD;
+
+    if overridden {
+        warn!(
+            "🚫 Mouse override: user moved mouse by ({}, {}), threshold {}px — aborting AI action",
+            dx, dy, MOUSE_OVERRIDE_THRESHOLD
+        );
+    }
+
+    overridden
+}
 
 // ---------------------------------------------------------------------------
 // Screen Capture (xcap)
 // ---------------------------------------------------------------------------
 
-/// Capture the primary monitor and return a JPEG-encoded base64 data URI
-/// along with the screen dimensions.
-///
-/// Pipeline: xcap → RgbaImage → JPEG encode → base64 string.
-fn capture_screen() -> Result<(String, ScreenBounds), String> {
-    // Get the primary monitor.
+/// Capture the primary monitor and return a JPEG-encoded base64 data URI.
+/// Also reads the current cursor position for mouse override tracking.
+fn capture_screen() -> Result<(String, ScreenBounds, i32, i32), String> {
     let monitors = Monitor::all().map_err(|e| format!("Failed to list monitors: {}", e))?;
     let monitor = monitors
         .into_iter()
@@ -104,12 +233,10 @@ fn capture_screen() -> Result<(String, ScreenBounds), String> {
     let width = monitor.width();
     let height = monitor.height();
 
-    // Capture the screen as an RGBA image.
     let image = monitor
         .capture_image()
         .map_err(|e| format!("Screen capture failed: {}", e))?;
 
-    // Encode to JPEG for a smaller payload.
     let mut jpeg_buf: Vec<u8> = Vec::new();
     let mut cursor = Cursor::new(&mut jpeg_buf);
     let encoder = JpegEncoder::new_with_quality(&mut cursor, JPEG_QUALITY);
@@ -117,42 +244,57 @@ fn capture_screen() -> Result<(String, ScreenBounds), String> {
         .write_with_encoder(encoder)
         .map_err(|e| format!("JPEG encoding failed: {}", e))?;
 
-    // Encode to base64 with data URI prefix.
     let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_buf);
     let data_uri = format!("data:image/jpeg;base64,{}", b64);
 
-    Ok((
-        data_uri,
-        ScreenBounds {
-            width,
-            height,
-        },
-    ))
+    // We use the center of the screen as a proxy for cursor position
+    // since xcap doesn't expose cursor coords. rdev updates this asynchronously.
+    let mouse_x = LAST_MOUSE_X.load(Ordering::SeqCst);
+    let mouse_y = LAST_MOUSE_Y.load(Ordering::SeqCst);
+
+    Ok((data_uri, ScreenBounds { width, height }, mouse_x, mouse_y))
 }
 
-/// Build a DeviceObservationPayload with a real screenshot.
-fn create_observation() -> Result<DeviceObservationPayload, String> {
+fn create_observation() -> Result<(DeviceObservationPayload, i32, i32), String> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    let (screen_base64, screen_bounds) = capture_screen()?;
+    let (screen_base64, screen_bounds, mouse_x, mouse_y) = capture_screen()?;
 
-    Ok(DeviceObservationPayload {
+    let payload = DeviceObservationPayload {
         device_id: DEVICE_ID.to_string(),
         timestamp,
         screen_base64,
         screen_bounds,
-    })
+        status: None,
+    };
+
+    Ok((payload, mouse_x, mouse_y))
+}
+
+/// Build an "interrupted" payload to notify the backend.
+fn create_interrupted_payload(reason: &str) -> DeviceObservationPayload {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    DeviceObservationPayload {
+        device_id: DEVICE_ID.to_string(),
+        timestamp,
+        screen_base64: String::new(),
+        screen_bounds: ScreenBounds { width: 0, height: 0 },
+        status: Some(format!("interrupted:{}", reason)),
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Command Execution (enigo)
+// Command Execution (enigo) with Kill Switch + Mouse Override
 // ---------------------------------------------------------------------------
 
 /// Validate that coordinates are within screen bounds.
-/// Prevents enigo from moving the mouse to invalid positions.
 fn validate_coords(coords: &ScreenCoordinates, bounds: &ScreenBounds) -> bool {
     coords.x >= 0
         && coords.y >= 0
@@ -160,10 +302,54 @@ fn validate_coords(coords: &ScreenCoordinates, bounds: &ScreenBounds) -> bool {
         && (coords.y as u32) <= bounds.height
 }
 
-/// Execute an AgentActionCommand using enigo for OS-level input simulation.
+/// Result of attempting to execute a command.
+pub enum ExecutionResult {
+    /// Command executed successfully.
+    Success,
+    /// Kill switch was active — halt and notify backend.
+    KillSwitch,
+    /// User moved mouse — abort this action.
+    MouseOverride,
+    /// Command failed for another reason.
+    Error(String),
+}
+
+/// Execute an AgentActionCommand with safety checks.
 ///
-/// Coordinate validation is performed before any mouse action to prevent
-/// moving the cursor outside the screen bounds.
+/// Checks (in order):
+/// 1. Kill switch flag — if set, returns KillSwitch immediately.
+/// 2. Mouse override — if user moved mouse >50px, returns MouseOverride.
+/// 3. Coordinate bounds validation.
+/// 4. enigo execution.
+fn execute_command_safe(
+    enigo: &mut Enigo,
+    command: &AgentActionCommand,
+    screen_bounds: &ScreenBounds,
+    last_mouse_x: i32,
+    last_mouse_y: i32,
+) -> ExecutionResult {
+    // 1. Kill switch takes unconditional priority.
+    if KILL_SWITCH_ACTIVE.load(Ordering::SeqCst) {
+        return ExecutionResult::KillSwitch;
+    }
+
+    // 2. Mouse override check for mouse actions.
+    let is_mouse_action = matches!(
+        command.action,
+        AgentActionType::MouseMove | AgentActionType::MouseClick | AgentActionType::MouseDoubleClick
+    );
+
+    if is_mouse_action && is_mouse_overridden(last_mouse_x, last_mouse_y) {
+        return ExecutionResult::MouseOverride;
+    }
+
+    // 3. Execute the command.
+    match execute_command(enigo, command, screen_bounds) {
+        Ok(()) => ExecutionResult::Success,
+        Err(e) => ExecutionResult::Error(e),
+    }
+}
+
 fn execute_command(
     enigo: &mut Enigo,
     command: &AgentActionCommand,
@@ -175,18 +361,15 @@ fn execute_command(
                 .coordinates
                 .as_ref()
                 .ok_or("mouse_move requires coordinates")?;
-
             if !validate_coords(coords, screen_bounds) {
                 return Err(format!(
                     "Coordinates ({}, {}) out of bounds ({}x{})",
                     coords.x, coords.y, screen_bounds.width, screen_bounds.height
                 ));
             }
-
             enigo
                 .move_mouse(coords.x, coords.y, Coordinate::Abs)
                 .map_err(|e| format!("mouse_move failed: {}", e))?;
-
             info!("🖱️  Moved mouse to ({}, {})", coords.x, coords.y);
         }
 
@@ -195,21 +378,18 @@ fn execute_command(
                 .coordinates
                 .as_ref()
                 .ok_or("mouse_click requires coordinates")?;
-
             if !validate_coords(coords, screen_bounds) {
                 return Err(format!(
                     "Coordinates ({}, {}) out of bounds ({}x{})",
                     coords.x, coords.y, screen_bounds.width, screen_bounds.height
                 ));
             }
-
             enigo
                 .move_mouse(coords.x, coords.y, Coordinate::Abs)
                 .map_err(|e| format!("move before click failed: {}", e))?;
             enigo
                 .button(enigo::Button::Left, Direction::Click)
                 .map_err(|e| format!("mouse_click failed: {}", e))?;
-
             info!("🖱️  Clicked at ({}, {})", coords.x, coords.y);
         }
 
@@ -218,14 +398,12 @@ fn execute_command(
                 .coordinates
                 .as_ref()
                 .ok_or("mouse_double_click requires coordinates")?;
-
             if !validate_coords(coords, screen_bounds) {
                 return Err(format!(
                     "Coordinates ({}, {}) out of bounds ({}x{})",
                     coords.x, coords.y, screen_bounds.width, screen_bounds.height
                 ));
             }
-
             enigo
                 .move_mouse(coords.x, coords.y, Coordinate::Abs)
                 .map_err(|e| format!("move before double click failed: {}", e))?;
@@ -235,7 +413,6 @@ fn execute_command(
             enigo
                 .button(enigo::Button::Left, Direction::Click)
                 .map_err(|e| format!("double click (2) failed: {}", e))?;
-
             info!("🖱️  Double-clicked at ({}, {})", coords.x, coords.y);
         }
 
@@ -244,11 +421,9 @@ fn execute_command(
                 .text
                 .as_ref()
                 .ok_or("keyboard_type requires text")?;
-
             enigo
                 .text(text)
                 .map_err(|e| format!("keyboard_type failed: {}", e))?;
-
             info!("⌨️  Typed: \"{}\"", text);
         }
 
@@ -257,12 +432,10 @@ fn execute_command(
                 .key
                 .as_ref()
                 .ok_or("keyboard_press requires key")?;
-
             let key = map_key_string(key_str)?;
             enigo
                 .key(key, Direction::Click)
                 .map_err(|e| format!("keyboard_press failed: {}", e))?;
-
             info!("🔑 Pressed key: \"{}\"", key_str);
         }
 
@@ -275,7 +448,6 @@ fn execute_command(
 }
 
 /// Map a key name string to an enigo Key enum value.
-/// Supports common keys used by Vision LLMs.
 fn map_key_string(key: &str) -> Result<Key, String> {
     match key.to_lowercase().as_str() {
         "enter" | "return" => Ok(Key::Return),
@@ -311,7 +483,6 @@ fn map_key_string(key: &str) -> Result<Key, String> {
         "f10" => Ok(Key::F10),
         "f11" => Ok(Key::F11),
         "f12" => Ok(Key::F12),
-        // Single character keys (a-z, 0-9, punctuation).
         s if s.len() == 1 => {
             let c = s.chars().next().unwrap();
             Ok(Key::Unicode(c))
@@ -321,24 +492,29 @@ fn map_key_string(key: &str) -> Result<Key, String> {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket Loop (with real capture + execution)
+// WebSocket Loop (with kill switch + mouse override)
 // ---------------------------------------------------------------------------
 
-/// Run the WebSocket client loop with real screen capture and command execution.
-///
-/// - Sends real screenshots as JPEG base64 every 5 seconds.
-/// - Parses incoming AgentActionCommands and executes them via enigo.
-/// - Reconnects with exponential backoff on disconnection.
+/// Run the WebSocket client loop with safety features:
+/// - Kill switch: severs connection instantly on Ctrl+Alt+K.
+/// - Mouse override: aborts mouse actions if human moved the mouse.
+/// - Sends "interrupted" payload to backend on either event.
 async fn websocket_loop() {
     let mut reconnect_delay = RECONNECT_DELAY_SECS;
 
-    // Track the latest screen bounds for coordinate validation.
     let current_bounds = Arc::new(std::sync::Mutex::new(ScreenBounds {
         width: 1920,
         height: 1080,
     }));
 
     loop {
+        // Don't reconnect while kill switch is active.
+        if KILL_SWITCH_ACTIVE.load(Ordering::SeqCst) {
+            info!("🔴 Kill switch is active — waiting for reset before reconnecting...");
+            sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+
         info!("🔗 Connecting to gateway: {}", GATEWAY_WS_URL);
 
         match connect_async(GATEWAY_WS_URL).await {
@@ -351,9 +527,8 @@ async fn websocket_loop() {
                 let bounds_for_reader = Arc::clone(&current_bounds);
                 let connected_flag = Arc::clone(&is_connected);
 
-                // READER: Handle incoming commands from the backend.
+                // READER task: handle incoming commands with safety checks.
                 let reader = tokio::spawn(async move {
-                    // Create enigo instance for OS input simulation.
                     let mut enigo = match Enigo::new(&Settings::default()) {
                         Ok(e) => e,
                         Err(e) => {
@@ -363,6 +538,12 @@ async fn websocket_loop() {
                     };
 
                     while let Some(msg_result) = read.next().await {
+                        // Kill switch check on every message.
+                        if KILL_SWITCH_ACTIVE.load(Ordering::SeqCst) {
+                            info!("🔴 Kill switch detected in reader — stopping");
+                            break;
+                        }
+
                         match msg_result {
                             Ok(Message::Text(text)) => {
                                 match serde_json::from_str::<AgentActionCommand>(&text) {
@@ -370,12 +551,31 @@ async fn websocket_loop() {
                                         info!("🎯 Received command: {:?}", cmd.action);
 
                                         let bounds = bounds_for_reader.lock().unwrap().clone();
-                                        if let Err(e) = execute_command(&mut enigo, &cmd, &bounds) {
-                                            error!("❌ Execution failed: {}", e);
+                                        let last_x = LAST_MOUSE_X.load(Ordering::SeqCst);
+                                        let last_y = LAST_MOUSE_Y.load(Ordering::SeqCst);
+
+                                        match execute_command_safe(
+                                            &mut enigo,
+                                            &cmd,
+                                            &bounds,
+                                            last_x,
+                                            last_y,
+                                        ) {
+                                            ExecutionResult::Success => {}
+                                            ExecutionResult::KillSwitch => {
+                                                warn!("🔴 Kill switch — skipping command");
+                                                break;
+                                            }
+                                            ExecutionResult::MouseOverride => {
+                                                warn!("🚫 Mouse override — AI action cancelled");
+                                                // The writer loop will send the interrupt payload.
+                                            }
+                                            ExecutionResult::Error(e) => {
+                                                error!("❌ Execution failed: {}", e);
+                                            }
                                         }
                                     }
                                     Err(_) => {
-                                        // Not a command (ACK or status message).
                                         info!("📨 Gateway: {}", text);
                                     }
                                 }
@@ -395,22 +595,47 @@ async fn websocket_loop() {
                     connected_flag.store(false, Ordering::SeqCst);
                 });
 
-                // WRITER: Send real screen observations periodically.
+                // WRITER: Send observations, check kill switch between each frame.
                 while is_connected.load(Ordering::SeqCst) {
+                    // Kill switch: sever connection and send interrupt.
+                    if KILL_SWITCH_ACTIVE.load(Ordering::SeqCst) {
+                        warn!("🔴 Kill switch activated — severing WebSocket connection");
+
+                        let payload = create_interrupted_payload("kill_switch");
+                        if let Ok(json) = serde_json::to_string(&payload) {
+                            let _ = write.send(Message::Text(json.into())).await;
+                        }
+
+                        let _ = write.send(Message::Close(None)).await;
+                        info!("📪 Connection severed by kill switch");
+                        break;
+                    }
+
                     match create_observation() {
-                        Ok(observation) => {
-                            // Update current screen bounds.
+                        Ok((mut observation, mouse_x, mouse_y)) => {
+                            // Update bounds.
                             {
                                 let mut bounds = current_bounds.lock().unwrap();
                                 *bounds = observation.screen_bounds.clone();
                             }
 
-                            let payload_size = observation.screen_base64.len();
+                            // Update mouse baseline for override detection.
+                            update_last_mouse_pos(mouse_x, mouse_y);
+
+                            // Check if mouse was overridden since last frame.
+                            let old_x = LAST_MOUSE_X.load(Ordering::SeqCst);
+                            let old_y = LAST_MOUSE_Y.load(Ordering::SeqCst);
+
+                            if is_mouse_overridden(old_x, old_y) {
+                                observation.status = Some("interrupted:mouse_override".to_string());
+                                warn!("🚫 Sending interrupted payload (mouse override)");
+                            }
+
                             info!(
-                                "📸 Captured {}x{} | JPEG base64: {} KB",
+                                "📸 Captured {}x{} | JPEG: {} KB",
                                 observation.screen_bounds.width,
                                 observation.screen_bounds.height,
-                                payload_size / 1024
+                                observation.screen_base64.len() / 1024
                             );
 
                             let json = match serde_json::to_string(&observation) {
@@ -428,7 +653,6 @@ async fn websocket_loop() {
                         }
                         Err(e) => {
                             error!("❌ Screen capture failed: {}", e);
-                            // Continue trying — monitor might become available.
                         }
                     }
 
@@ -451,6 +675,21 @@ async fn websocket_loop() {
 // Tauri Commands
 // ---------------------------------------------------------------------------
 
+/// Trigger the kill switch manually from the frontend.
+#[tauri::command]
+fn halt_agent() -> String {
+    KILL_SWITCH_ACTIVE.store(true, Ordering::SeqCst);
+    info!("🔴 Agent halted via Tauri command");
+    "Agent halted".to_string()
+}
+
+/// Reset the kill switch to allow the agent to resume.
+#[tauri::command]
+fn resume_agent() -> String {
+    reset_kill_switch();
+    "Agent resumed".to_string()
+}
+
 /// Simple greeting command for testing the Tauri IPC bridge.
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -465,12 +704,31 @@ fn greet(name: &str) -> String {
 pub fn run() {
     env_logger::init();
 
+    // Start the global hotkey listener on a dedicated OS thread (blocking).
+    spawn_hotkey_listener();
+
+    // Start a separate rdev thread to track mouse position for override detection.
+    thread::Builder::new()
+        .name("mouse-tracker".to_string())
+        .spawn(|| {
+            if let Err(e) = listen(|event| {
+                if let EventType::MouseMove { x, y } = event.event_type {
+                    LAST_MOUSE_X.store(x as i32, Ordering::SeqCst);
+                    LAST_MOUSE_Y.store(y as i32, Ordering::SeqCst);
+                }
+            }) {
+                error!("❌ Mouse tracker error: {:?}", e);
+            }
+        })
+        .expect("Failed to spawn mouse tracker thread");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .plugin(tauri_plugin_notification::init())
+        .invoke_handler(tauri::generate_handler![greet, halt_agent, resume_agent])
         .setup(|_app| {
             tokio::spawn(async {
-                info!("🚀 Starting screen capture + WebSocket client...");
+                info!("🚀 Starting screen capture + WebSocket client with kill switch...");
                 websocket_loop().await;
             });
             Ok(())

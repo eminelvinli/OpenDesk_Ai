@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -106,8 +107,8 @@ var upgrader = websocket.Upgrader{
 // HandleConnection upgrades an HTTP request to a WebSocket connection,
 // reads DeviceObservationPayload messages, and logs them.
 //
-// The first message from the client must be a valid DeviceObservationPayload
-// containing the deviceId, which is used to register the connection.
+// On the first message, validates that the device is paired by calling
+// the Node.js backend. Unpaired devices are rejected.
 func HandleConnection(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -135,9 +136,18 @@ func HandleConnection(hub *Hub, w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Register on first valid message.
+		// Register on first valid message — with pairing check.
 		if deviceID == "" {
 			deviceID = payload.DeviceID
+
+			// Validate pairing with the Node.js backend.
+			if !checkDevicePaired(deviceID) {
+				log.Printf("🚫 Unpaired device rejected: %s", deviceID)
+				reject := fmt.Sprintf(`{"status":"error","error":"Device %s is not paired. Enter your pairing code in the dashboard."}`, deviceID)
+				conn.WriteMessage(websocket.TextMessage, []byte(reject))
+				return
+			}
+
 			client := &Client{
 				DeviceID: deviceID,
 				Conn:     conn,
@@ -171,4 +181,43 @@ func HandleConnection(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("🔌 Connection closed: %s (%s)", conn.RemoteAddr(), deviceID)
+}
+
+// checkDevicePaired calls the Node.js backend to verify a device is paired.
+// Returns true if paired, false otherwise. On error, defaults to allowing
+// the connection (fail-open during development).
+func checkDevicePaired(deviceID string) bool {
+	backendURL := os.Getenv("BACKEND_URL")
+	if backendURL == "" {
+		backendURL = "http://localhost:3001"
+	}
+
+	url := fmt.Sprintf("%s/api/device/check/%s", backendURL, deviceID)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		// Backend unreachable — fail-open in dev, fail-closed in prod.
+		log.Printf("⚠️  Pairing check failed (backend unreachable): %v — allowing connection", err)
+		return true
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("⚠️  Pairing check returned status %d for %s", resp.StatusCode, deviceID)
+		return true // Fail-open in development.
+	}
+
+	var result struct {
+		Paired bool   `json:"paired"`
+		UserID string `json:"userId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("⚠️  Failed to parse pairing response: %v", err)
+		return true
+	}
+
+	if result.Paired {
+		log.Printf("✅ Device %s is paired with user %s", deviceID, result.UserID)
+	}
+	return result.Paired
 }

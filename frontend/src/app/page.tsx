@@ -3,11 +3,17 @@
 import { useState } from 'react';
 import LiveView from '@/components/LiveView';
 import TaskInput from '@/components/TaskInput';
+import PairDeviceModal from '@/components/PairDeviceModal';
+import LogConsole from '@/components/LogConsole';
+
 
 const DEVICE_ID = 'dev-rust-001';
 
 export default function DashboardPage() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [showPairModal, setShowPairModal] = useState(false);
+  const [activeTab, setActiveTab] = useState<'live' | 'console'>('live');
+
 
   return (
     <div className="min-h-screen bg-[#0a0e1a]">
@@ -24,6 +30,12 @@ export default function DashboardPage() {
           </div>
 
           <div className="flex items-center gap-4">
+            <button
+              onClick={() => setShowPairModal(true)}
+              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition-all duration-200"
+            >
+              + Add Device
+            </button>
             <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 border border-slate-700 rounded-full">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
               <span className="text-xs text-slate-400">System Online</span>
@@ -43,9 +55,32 @@ export default function DashboardPage() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left Column — Live View (takes 2/3) */}
+          {/* Left Column — Live View + Console (takes 2/3) */}
           <div className="lg:col-span-2 space-y-6">
-            <LiveView deviceId={DEVICE_ID} />
+            {/* Tab header */}
+            <div className="flex items-center gap-1 border-b border-slate-800">
+              {(['live', 'console'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={`px-4 py-2 text-sm font-medium transition-all duration-150 border-b-2 -mb-px ${activeTab === tab
+                      ? 'border-blue-500 text-blue-400'
+                      : 'border-transparent text-slate-500 hover:text-slate-300'
+                    }`}
+                >
+                  {tab === 'live' ? '🖥 Live View' : '📋 Console'}
+                </button>
+              ))}
+            </div>
+
+            {/* Tab panels */}
+            <div className="h-[420px]">
+              {activeTab === 'live' ? (
+                <LiveView deviceId={DEVICE_ID} />
+              ) : (
+                <LogConsole deviceId={DEVICE_ID} />
+              )}
+            </div>
 
             {/* Active Task Info */}
             {activeTaskId && (
@@ -132,6 +167,13 @@ export default function DashboardPage() {
           </div>
         </div>
       </main>
+
+      {/* Pair Device Modal */}
+      <PairDeviceModal
+        isOpen={showPairModal}
+        onClose={() => setShowPairModal(false)}
+        onPaired={(device) => console.log('Paired:', device)}
+      />
     </div>
   );
 }

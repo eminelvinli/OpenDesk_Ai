@@ -20,6 +20,7 @@ import {
     DeviceObservationPayload,
     TaskState,
 } from '../types';
+import { createTaskLogger, generateTraceId, logger } from '../utils/logger';
 
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
@@ -38,28 +39,36 @@ const connection = {
 async function processAgentTask(job: Job<AgentTaskJobData>): Promise<void> {
     const { taskLogId, userId, deviceId, goal } = job.data;
 
-    console.log(`\n🚀 Processing job ${job.id}: "${goal}" on device ${deviceId}`);
+    // Create a stable traceId for this entire job execution.
+    const traceId = generateTraceId();
+    const log = createTaskLogger(traceId, deviceId);
+
+    log.info(`[Worker] Processing job ${job.id}`, { goal, deviceId, taskLogId, jobId: job.id });
 
     // 1. Verify the device exists and is online.
     const device = await Device.findOne({ deviceId });
     if (!device) {
+        log.error('[Worker] Device not found', { deviceId });
         throw new Error(`Device not found: ${deviceId}`);
     }
     if (!device.isOnline) {
+        log.warn('[Worker] Device is offline', { deviceId });
         throw new Error(`Device is offline: ${deviceId}`);
     }
 
-    // 2. Update TaskLog to 'running'.
+    // 2. Update TaskLog to 'running' and persist traceId.
     const taskLog = await TaskLog.findById(taskLogId);
     if (!taskLog) {
+        log.error('[Worker] TaskLog not found', { taskLogId });
         throw new Error(`TaskLog not found: ${taskLogId}`);
     }
 
     taskLog.status = 'running';
+    taskLog.traceId = traceId;
     await taskLog.save();
 
     // 3. Build the TaskState for the agentic loop.
-    const taskState: TaskState = {
+    const taskState: TaskState & { traceId: string } = {
         userId,
         deviceId,
         goal,
@@ -71,24 +80,30 @@ async function processAgentTask(job: Job<AgentTaskJobData>): Promise<void> {
         errorMessage: null,
         iterationCount: 0,
         maxIterations: taskLog.maxIterations,
+        traceId,
     };
 
-    // 4. Run the agentic loop.
-    //    getObservation and dispatchAction are wired to the real pipeline.
+    // 4. Run the agentic loop with the bound logger.
     const finalState = await runAgenticLoop(
         taskState,
         createObservationGetter(deviceId),
-        createActionDispatcher(deviceId)
+        createActionDispatcher(deviceId),
+        log
     );
 
-    // 5. Update TaskLog with final state.
+    // 5. Update TaskLog with final state + token usage.
     taskLog.status = finalState.status;
     taskLog.actionHistory = finalState.actionHistory;
     taskLog.iterationCount = finalState.iterationCount;
     taskLog.errorMessage = finalState.errorMessage;
-    await taskLog.save();
 
-    console.log(`📋 Task ${taskLogId} completed with status: ${finalState.status}`);
+    log.info(`[Worker] Task completed`, {
+        status: finalState.status,
+        iterations: finalState.iterationCount,
+        taskLogId,
+    });
+
+    await taskLog.save();
 }
 
 /**
@@ -157,13 +172,12 @@ export const agentTaskWorker = new Worker<AgentTaskJobData>(
 // ---------------------------------------------------------------------------
 
 agentTaskWorker.on('completed', (job) => {
-    console.log(`✅ Job completed: ${job.id}`);
+    logger.info({ jobId: job.id }, '✅ Job completed');
 });
 
 agentTaskWorker.on('failed', async (job, err) => {
-    console.error(`❌ Job failed: ${job?.id} — ${err.message}`);
+    logger.error({ jobId: job?.id, error: err.message, stack: err.stack }, '❌ Job failed');
 
-    // Update TaskLog status to 'failed' in MongoDB.
     if (job) {
         try {
             const { taskLogId } = job.data;
@@ -171,16 +185,16 @@ agentTaskWorker.on('failed', async (job, err) => {
                 status: 'failed',
                 errorMessage: err.message,
             });
-            console.log(`📋 TaskLog ${taskLogId} marked as failed`);
+            logger.info({ taskLogId }, '📋 TaskLog marked as failed');
         } catch (dbErr) {
             const msg = dbErr instanceof Error ? dbErr.message : 'Unknown DB error';
-            console.error(`❌ Failed to update TaskLog on failure: ${msg}`);
+            logger.error({ error: msg }, '❌ Failed to update TaskLog on failure');
         }
     }
 });
 
 agentTaskWorker.on('error', (err) => {
-    console.error('❌ Worker error:', err.message);
+    logger.error({ error: err.message, stack: err.stack }, '❌ Worker error');
 });
 
 /** Gracefully close the worker. */

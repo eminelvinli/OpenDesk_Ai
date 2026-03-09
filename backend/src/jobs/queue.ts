@@ -67,6 +67,44 @@ export async function enqueueTask(
     return { jobId: job.id ?? data.taskLogId };
 }
 
+/**
+ * Cancel any active BullMQ job for a given device and mark the TaskLog as paused.
+ * Called when the Rust client sends an "interrupted" status payload.
+ *
+ * @param deviceId - The device whose active job should be cancelled.
+ * @returns true if a job was found and cancelled, false otherwise.
+ */
+export async function cancelTaskForDevice(deviceId: string): Promise<boolean> {
+    const { TaskLog } = await import('../db');
+
+    // Find jobs matching this device in the queue.
+    const [waiting, active, delayed] = await Promise.all([
+        agentTaskQueue.getWaiting(),
+        agentTaskQueue.getActive(),
+        agentTaskQueue.getDelayed(),
+    ]);
+
+    const all = [...waiting, ...active, ...delayed];
+    const match = all.find((job) => job.data.deviceId === deviceId);
+
+    if (!match) {
+        return false;
+    }
+
+    // Remove the job from the queue.
+    await match.remove();
+    console.log(`🔴 Cancelled BullMQ job ${match.id} for device ${deviceId}`);
+
+    // Update the TaskLog status to 'paused'.
+    await TaskLog.findByIdAndUpdate(match.data.taskLogId, {
+        status: 'paused',
+        errorMessage: 'Interrupted by user (kill switch or mouse override)',
+    });
+
+    console.log(`📋 TaskLog ${match.data.taskLogId} marked as paused (interrupted)`);
+    return true;
+}
+
 /** Gracefully close the queue connection. */
 export async function closeQueue(): Promise<void> {
     await agentTaskQueue.close();

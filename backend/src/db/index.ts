@@ -206,6 +206,13 @@ export interface ITaskLog extends Document {
     errorMessage: string | null;
     iterationCount: number;
     maxIterations: number;
+    /** Cumulative LLM token usage across all iterations of this task. */
+    tokenUsage: {
+        promptTokens: number;
+        completionTokens: number;
+        totalTokens: number;
+    };
+    traceId: string | null;
     createdAt: Date;
     updatedAt: Date;
 }
@@ -249,6 +256,15 @@ const TaskLogSchema = new Schema<ITaskLog>(
         maxIterations: {
             type: Number,
             default: 50,
+        },
+        tokenUsage: {
+            promptTokens: { type: Number, default: 0 },
+            completionTokens: { type: Number, default: 0 },
+            totalTokens: { type: Number, default: 0 },
+        },
+        traceId: {
+            type: String,
+            default: null,
         },
     },
     { timestamps: true }

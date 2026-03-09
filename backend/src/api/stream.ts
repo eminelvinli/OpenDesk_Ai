@@ -7,13 +7,13 @@
  */
 
 import { Router, Request, Response } from 'express';
+import { LogEvent, setPushLogFn } from '../utils/logger';
 
 const router = Router();
 
 /**
  * In-memory store of the latest observation per device.
- * Updated by the observation ingestion pipeline.
- * In production, this would be backed by Redis Pub/Sub.
+ * In production, back with Redis Pub/Sub.
  */
 interface LatestObservation {
     deviceId: string;
@@ -27,7 +27,6 @@ const sseClients = new Map<string, Set<Response>>();
 
 /**
  * Update the latest observation for a device and notify all SSE clients.
- * Called by the observation ingestion pipeline.
  */
 export function pushObservation(observation: LatestObservation): void {
     latestObservations.set(observation.deviceId, observation);
@@ -63,6 +62,24 @@ export function pushAgentStatus(
         }
     }
 }
+
+/**
+ * Push a structured log event to SSE clients watching a device.
+ * Called by the task logger (createTaskLogger) so the frontend
+ * console output tab receives real-time log lines.
+ */
+export function pushLog(deviceId: string, event: LogEvent): void {
+    const clients = sseClients.get(deviceId);
+    if (clients) {
+        const data = JSON.stringify({ type: 'agent_log', ...event });
+        for (const res of clients) {
+            res.write(`data: ${data}\n\n`);
+        }
+    }
+}
+
+// Wire pushLog into the logger module (avoids circular import).
+setPushLogFn(pushLog);
 
 /**
  * GET /api/stream/:deviceId
