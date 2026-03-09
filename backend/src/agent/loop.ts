@@ -256,7 +256,8 @@ export async function evaluateNextStep(
         history,
         observation.screenBounds,
         personaRules,
-        log
+        log,
+        observation.toolResult  // inject tool result from Rust into LLM context
     );
 
     // Double-check coordinates are within screen bounds (zero-trust).

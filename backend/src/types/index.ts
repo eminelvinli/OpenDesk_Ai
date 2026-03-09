@@ -29,6 +29,12 @@ export interface ScreenBounds {
 /**
  * All possible actions the Vision LLM can instruct the Rust client to perform.
  * The `done` action signals the agentic loop to terminate.
+ *
+ * OS-level skill actions (returning tool_result):
+ *  - read_clipboard: read OS clipboard → returned in next observation
+ *  - write_clipboard: write text to OS clipboard
+ *  - scroll_window: scroll up/down at current mouse position
+ *  - get_active_window_title: get focused window title → returned in next observation
  */
 export type AgentActionType =
     | 'mouse_move'
@@ -36,26 +42,53 @@ export type AgentActionType =
     | 'mouse_double_click'
     | 'keyboard_type'
     | 'keyboard_press'
-    | 'done';
+    | 'done'
+    // OS-level skill tools
+    | 'read_clipboard'
+    | 'write_clipboard'
+    | 'scroll_window'
+    | 'get_active_window_title';
 
 /**
  * Command payload sent from the Node.js backend to the Rust desktop client.
  * Routed through the Go gateway without modification.
  *
  * - `coordinates` is required for mouse actions, null otherwise.
- * - `text` is required for `keyboard_type`, null otherwise.
+ * - `text` is required for `keyboard_type` or `write_clipboard`, null otherwise.
  * - `key` is required for `keyboard_press`, null otherwise.
+ * - `params` carries additional parameters for skill actions (e.g., scroll direction).
  */
 export interface AgentActionCommand {
     action: AgentActionType;
     coordinates: ScreenCoordinates | null;
     text: string | null;
     key: string | null;
+    /** Additional tool-specific parameters (e.g., { direction: "down", amount: "3" }). */
+    params?: Record<string, string> | null;
 }
 
 // ---------------------------------------------------------------------------
 // Device Observation (Rust → Backend via Gateway)
 // ---------------------------------------------------------------------------
+
+/**
+ * Tool result payload returned from the Rust client after executing a
+ * data-returning skill (read_clipboard, get_active_window_title).
+ * Carried inside DeviceObservationPayload.toolResult.
+ */
+export interface ToolResultPayload {
+    /** Which skill produced this result. */
+    toolName: 'read_clipboard' | 'get_active_window_title';
+
+    /** The string data returned by the OS (clipboard content or window title). */
+    data: string;
+
+    /** Whether the tool executed successfully. */
+    success: boolean;
+
+    /** Error message if success is false. */
+    error?: string;
+}
 
 /**
  * Observation payload streamed from the Rust desktop client to the backend.
@@ -73,6 +106,13 @@ export interface DeviceObservationPayload {
 
     /** Current screen resolution of the device. */
     screenBounds: ScreenBounds;
+
+    /**
+     * Result of a data-returning skill tool (read_clipboard / get_active_window_title).
+     * Populated only when the Rust client executed a query-type tool action.
+     * The agentic loop injects this into the LLM context as a tool_result.
+     */
+    toolResult?: ToolResultPayload;
 }
 
 // ---------------------------------------------------------------------------

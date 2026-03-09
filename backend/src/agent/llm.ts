@@ -51,20 +51,32 @@ const AgentActionCommandSchema = z.object({
             'keyboard_type',
             'keyboard_press',
             'done',
+            // OS-level skill tools
+            'read_clipboard',
+            'write_clipboard',
+            'scroll_window',
+            'get_active_window_title',
         ])
         .describe('The single next action to perform'),
     coordinates: CoordinatesSchema.nullable().describe(
-        'Required for mouse actions (x, y pixel position). Null for keyboard actions.'
+        'Required for mouse actions (x, y pixel position). Null for keyboard/tool actions.'
     ),
     text: z
         .string()
         .nullable()
-        .describe('Required for keyboard_type. The text string to type. Null for other actions.'),
+        .describe('Required for keyboard_type or write_clipboard. Null for other actions.'),
     key: z
         .string()
         .nullable()
         .describe(
             'Required for keyboard_press. The key name (e.g. "Enter", "Tab", "Escape"). Null for other actions.'
+        ),
+    params: z
+        .record(z.string(), z.string())
+        .nullable()
+        .optional()
+        .describe(
+            'Additional parameters for skill tools. E.g. { direction: "down", amount: "3" } for scroll_window.'
         ),
 });
 
@@ -123,7 +135,8 @@ export async function callVisionLLM(
     history: ActionHistoryEntry[],
     screenBounds: ScreenBounds,
     personaRules?: string,
-    log?: TaskLogger
+    log?: TaskLogger,
+    toolResult?: { toolName: string; data: string; success: boolean; error?: string }
 ): Promise<{ command: AgentActionCommand; rawOutput: string; tokenUsage: TokenUsage }> {
     const client = getOpenAIClient();
     const model = OPENAI_MODEL;
@@ -137,7 +150,7 @@ export async function callVisionLLM(
             reasoning: e.reasoning,
         }))
     );
-    const userTextContent = buildUserMessage(goal, formattedHistory, personaRules);
+    const userTextContent = buildUserMessage(goal, formattedHistory, personaRules, toolResult);
     const boundsHint = `\n\n## SCREEN BOUNDS\nThe screen is ${screenBounds.width}x${screenBounds.height} pixels. All coordinates must be within (0,0) to (${screenBounds.width},${screenBounds.height}).`;
 
     const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
@@ -231,7 +244,8 @@ export async function callVisionLLMWithRetry(
     history: ActionHistoryEntry[],
     screenBounds: ScreenBounds,
     personaRules?: string,
-    log?: TaskLogger
+    log?: TaskLogger,
+    toolResult?: { toolName: string; data: string; success: boolean; error?: string }
 ): Promise<{ command: AgentActionCommand; rawOutput: string; tokenUsage: TokenUsage }> {
     let lastError: Error | null = null;
 
@@ -243,7 +257,8 @@ export async function callVisionLLMWithRetry(
                 history,
                 screenBounds,
                 personaRules,
-                log
+                log,
+                toolResult
             );
         } catch (err) {
             lastError = err instanceof Error ? err : new Error(String(err));

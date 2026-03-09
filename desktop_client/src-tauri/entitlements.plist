@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        OpenDesk AI — macOS Entitlements
+
+        We request only the minimum entitlements required for operation.
+        Screen capture and input simulation require broad entitlements on macOS.
+
+        IMPORTANT: The user must grant permissions in:
+          System Settings → Privacy & Security → Screen Recording
+          System Settings → Privacy & Security → Accessibility
+    -->
+
+    <!-- Allow outgoing network connections (WebSocket to Go Gateway). -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Required for xcap screen capture on macOS Ventura+. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <false/>
+
+    <!-- Required for rdev global keyboard/mouse listener. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <false/>
+
+    <!--
+        Runtime hardening: allow unsigned dynamic libraries.
+        Needed because rdev and xcap load system frameworks at runtime.
+    -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+
+</dict>
+</plist>

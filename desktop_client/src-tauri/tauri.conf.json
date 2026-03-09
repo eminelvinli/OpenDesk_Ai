@@ -1,25 +1,29 @@
 {
-    "$schema": "https://raw.githubusercontent.com/nicegui/nicegui/main/nicegui/static/tauri-v2/tauri.schema.json",
+    "$schema": "https://schema.tauri.app/config/2",
     "productName": "OpenDesk AI",
     "version": "0.1.0",
-    "identifier": "ai.opendesk.client",
+    "identifier": "com.opendesk.ai",
     "build": {
         "frontendDist": "../src",
-        "devUrl": "http://localhost:1420"
+        "devUrl": "http://localhost:1420",
+        "beforeDevCommand": "",
+        "beforeBuildCommand": ""
     },
     "app": {
-        "title": "OpenDesk AI",
         "windows": [
             {
                 "title": "OpenDesk AI — Device Pairing",
                 "width": 480,
                 "height": 640,
+                "minWidth": 400,
+                "minHeight": 560,
                 "resizable": true,
-                "center": true
+                "center": true,
+                "decorations": true
             }
         ],
         "security": {
-            "csp": null
+            "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws://localhost:8080 wss://gateway.opendesk.ai"
         }
     },
     "bundle": {
@@ -31,6 +35,31 @@
             "icons/128x128@2x.png",
             "icons/icon.icns",
             "icons/icon.ico"
-        ]
+        ],
+        "category": "Utility",
+        "shortDescription": "Autonomous AI desktop operator agent",
+        "longDescription": "OpenDesk AI pairs your desktop with an AI agent that can see your screen and operate your computer to complete tasks on your behalf.",
+        "copyright": "Copyright © 2026 OpenDesk AI",
+        "linux": {
+            "appimage": {
+                "bundleMediaFramework": true
+            }
+        },
+        "macOS": {
+            "minimumSystemVersion": "13.0",
+            "entitlements": "entitlements.plist",
+            "exceptionDomain": "",
+            "signingIdentity": null,
+            "providerShortName": null
+        },
+        "windows": {
+            "certificateThumbprint": null,
+            "digestAlgorithm": "sha256",
+            "timestampUrl": "",
+            "wix": {
+                "bannerPath": null,
+                "dialogImagePath": null
+            }
+        }
     }
 }

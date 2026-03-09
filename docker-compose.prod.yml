@@ -1,0 +1,182 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# OpenDesk AI — Production Docker Compose
+#
+# Usage:
+#   cp .env.production.example .env.production
+#   # Fill in all values in .env.production
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#
+# Prerequisites on VPS:
+#   - Docker + Docker Compose v2
+#   - DNS A records pointing your domains to this server's public IP
+#     app.opendesk.ai      → <VPS_IP>
+#     gateway.opendesk.ai  → <VPS_IP>
+#   - Ports 80 and 443 open in firewall (Caddy handles ACME challenge)
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: opendesk-ai-prod
+
+services:
+
+  # ── Reverse Proxy + TLS (Caddy) ────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: opendesk-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80" # HTTP → redirect to HTTPS
+      - "443:443" # HTTPS
+      - "443:443/udp" # HTTP/3 (QUIC)
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # Let's Encrypt certificates (persisted)
+      - caddy_config:/config # Caddy config cache
+    networks:
+      - opendesk-net
+    depends_on:
+      - frontend
+      - backend
+      - gateway
+
+  # ── Next.js Web Dashboard ──────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: opendesk-ai/frontend:${APP_VERSION:-latest}
+    container_name: opendesk-frontend
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      NEXT_PUBLIC_GATEWAY_WS_URL: ${NEXT_PUBLIC_GATEWAY_WS_URL}
+    networks:
+      - opendesk-net
+    healthcheck:
+      test: [ "CMD", "wget", "-qO-", "http://localhost:3000/api/health" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Node.js AI Backend ─────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: opendesk-ai/backend:${APP_VERSION:-latest}
+    container_name: opendesk-backend
+    restart: unless-stopped
+    expose:
+      - "3001"
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+    networks:
+      - opendesk-net
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "wget", "-qO-", "http://localhost:3001/api/health" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ── Go WebSocket Gateway ───────────────────────────────────────────────────
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    image: opendesk-ai/gateway:${APP_VERSION:-latest}
+    container_name: opendesk-gateway
+    restart: unless-stopped
+    expose:
+      - "8080"
+    env_file:
+      - .env.production
+    environment:
+      BACKEND_URL: "http://backend:3001"
+    networks:
+      - opendesk-net
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "wget", "-qO-", "http://localhost:8080/health" ]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+  # ── Redis (BullMQ + Session Cache) ────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: opendesk-redis
+    restart: unless-stopped
+    expose:
+      - "6379"
+    command: >
+      redis-server
+        --appendonly yes
+        --requirepass ${REDIS_PASSWORD}
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - opendesk-net
+    healthcheck:
+      test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── MongoDB (Users, Devices, TaskLogs, Personas) ───────────────────────────
+  mongodb:
+    image: mongo:7
+    container_name: opendesk-mongodb
+    restart: unless-stopped
+    expose:
+      - "27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_DATABASE: opendesk
+    volumes:
+      - mongo_data:/data/db
+      - mongo_config:/data/configdb
+    networks:
+      - opendesk-net
+    healthcheck:
+      test: [ "CMD", "mongosh", "--username", "${MONGO_USERNAME}", "--password", "${MONGO_PASSWORD}", "--eval", "db.adminCommand('ping')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  opendesk-net:
+    driver: bridge
+    name: opendesk-prod-network
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  caddy_data:
+    name: opendesk-caddy-data
+  caddy_config:
+    name: opendesk-caddy-config
+  redis_data:
+    name: opendesk-redis-data
+  mongo_data:
+    name: opendesk-mongo-data
+  mongo_config:
+    name: opendesk-mongo-config

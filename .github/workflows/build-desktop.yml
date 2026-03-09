@@ -1,0 +1,147 @@
+name: Build Desktop Client
+
+on:
+  push:
+    tags:
+      - 'v*'          # Trigger on version tags (e.g. v1.0.0)
+    branches:
+      - main          # Also build on main for artifact preview
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:  # Manual trigger from GitHub UI
+
+# ---------------------------------------------------------------------------
+# Environment: injects the production gateway URL into the Rust binary.
+# The Rust code reads GATEWAY_WS_URL at compile time via env!().
+# Override this secret in GitHub → Settings → Secrets for production.
+# ---------------------------------------------------------------------------
+env:
+  TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+  TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+  GATEWAY_WS_URL: ${{ secrets.GATEWAY_WS_URL || 'wss://gateway.opendesk.ai/ws' }}
+
+jobs:
+  build:
+    name: Build for ${{ matrix.platform }}
+    runs-on: ${{ matrix.platform }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── macOS — produces .dmg and .app.tar.gz ──────────────────────
+          - platform: macos-latest
+            args: '--target aarch64-apple-darwin --target x86_64-apple-darwin'
+            target: 'universal-apple-darwin'
+
+          # ── Windows — produces .exe (NSIS) and .msi (WiX) ─────────────
+          - platform: windows-latest
+            args: ''
+            target: 'x86_64-pc-windows-msvc'
+
+          # ── Linux — produces .AppImage and .deb ────────────────────────
+          - platform: ubuntu-22.04
+            args: ''
+            target: 'x86_64-unknown-linux-gnu'
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Linux system dependencies (required for Tauri + xcap + rdev) ───
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            libxtst-dev \
+            libx11-dev \
+            libxext-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libasound2-dev
+
+      # ── Node.js (needed for Tauri CLI + frontend build) ─────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: desktop_client/package-lock.json
+
+      # ── Rust toolchain ───────────────────────────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: |
+            aarch64-apple-darwin
+            x86_64-apple-darwin
+            x86_64-pc-windows-msvc
+            x86_64-unknown-linux-gnu
+
+      # ── Rust build cache (speeds up subsequent CI runs) ─────────────────
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './desktop_client/src-tauri -> target'
+
+      # ── Install frontend dependencies ────────────────────────────────────
+      - name: Install desktop client npm dependencies
+        run: npm ci
+        working-directory: desktop_client
+
+      # ── Build & bundle via Tauri ─────────────────────────────────────────
+      # GATEWAY_WS_URL is read by the Rust build via env!() macro,
+      # injecting the production WebSocket URL at compile time.
+      - name: Build Tauri application
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GATEWAY_WS_URL: ${{ env.GATEWAY_WS_URL }}
+        with:
+          projectPath: desktop_client
+          args: ${{ matrix.args }}
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: 'OpenDesk AI ${{ github.ref_name }}'
+          releaseBody: |
+            ## OpenDesk AI ${{ github.ref_name }}
+
+            Autonomous AI desktop operator — pairs your desktop with an AI agent.
+
+            ### Downloads
+            | Platform | File |
+            |---|---|
+            | macOS (Universal) | `.dmg` |
+            | Windows | `.exe` (NSIS) or `.msi` (WiX) |
+            | Linux | `.AppImage` or `.deb` |
+
+            ### Installation
+            See [README.md](https://github.com/${{ github.repository }}/blob/main/README.md) for setup instructions.
+          releaseDraft: true
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+      # ── Upload build artifacts (non-tag builds) ──────────────────────────
+      - name: Upload artifacts
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: opendesk-ai-${{ matrix.platform }}-${{ github.sha }}
+          path: |
+            desktop_client/src-tauri/target/release/bundle/**/*.dmg
+            desktop_client/src-tauri/target/release/bundle/**/*.app.tar.gz
+            desktop_client/src-tauri/target/release/bundle/**/*.exe
+            desktop_client/src-tauri/target/release/bundle/**/*.msi
+            desktop_client/src-tauri/target/release/bundle/**/*.AppImage
+            desktop_client/src-tauri/target/release/bundle/**/*.deb
+          retention-days: 14

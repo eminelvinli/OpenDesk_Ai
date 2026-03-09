@@ -11,12 +11,14 @@
 //!
 //! All AI reasoning happens in the Node.js backend.
 
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use arboard::Clipboard;
 use base64::Engine;
 use enigo::{Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use futures_util::{SinkExt, StreamExt};
@@ -56,6 +58,11 @@ pub enum AgentActionType {
     KeyboardType,
     KeyboardPress,
     Done,
+    // OS-level skill tools
+    ReadClipboard,
+    WriteClipboard,
+    ScrollWindow,
+    GetActiveWindowTitle,
 }
 
 /// Incoming command from the Node.js backend (via Go Gateway).
@@ -65,6 +72,20 @@ pub struct AgentActionCommand {
     pub coordinates: Option<ScreenCoordinates>,
     pub text: Option<String>,
     pub key: Option<String>,
+    /// Additional parameters for skill tools (e.g., scroll direction/amount).
+    #[serde(default)]
+    pub params: Option<HashMap<String, String>>,
+}
+
+/// Tool result returned from a data-querying skill (clipboard read, window title).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResultPayload {
+    pub tool_name: String,
+    pub data: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Outgoing observation payload sent to the backend (via Go Gateway).
@@ -77,13 +98,30 @@ pub struct DeviceObservationPayload {
     pub screen_bounds: ScreenBounds,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Populated when a data-returning skill (read_clipboard, get_active_window_title)
+    /// was just executed. The backend injects this into the next LLM call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<ToolResultPayload>,
 }
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-const GATEWAY_WS_URL: &str = "ws://localhost:8080/ws";
+/// Gateway WebSocket URL.
+///
+/// Set `GATEWAY_WS_URL` env var at compile time to override for production:
+///   GATEWAY_WS_URL=wss://gateway.opendesk.ai/ws cargo build --release
+///
+/// The GitHub Actions workflow injects this from the GATEWAY_WS_URL repository secret.
+/// Falls back to localhost for local development when the env var is not set.
+const GATEWAY_WS_URL: &str = {
+    match option_env!("GATEWAY_WS_URL") {
+        Some(url) => url,
+        None => "ws://localhost:8080/ws",
+    }
+};
+
 const OBSERVATION_INTERVAL_SECS: u64 = 5;
 const RECONNECT_DELAY_SECS: u64 = 3;
 const MAX_RECONNECT_DELAY_SECS: u64 = 30;
@@ -442,6 +480,50 @@ fn execute_command(
         AgentActionType::Done => {
             info!("✅ Agent signaled done — no action to execute");
         }
+
+        // ------------------------------------------------------------------
+        // OS-level skill tools
+        // ------------------------------------------------------------------
+
+        AgentActionType::WriteClipboard => {
+            let text = command
+                .text
+                .as_ref()
+                .ok_or("write_clipboard requires text")?;
+            let mut clip = Clipboard::new()
+                .map_err(|e| format!("Failed to open clipboard: {}", e))?;
+            clip.set_text(text.clone())
+                .map_err(|e| format!("write_clipboard failed: {}", e))?;
+            info!("📋 Wrote {} chars to clipboard", text.len());
+        }
+
+        AgentActionType::ScrollWindow => {
+            let dir = command
+                .params
+                .as_ref()
+                .and_then(|p| p.get("direction"))
+                .map(|s| s.as_str())
+                .unwrap_or("down");
+            let amount: i32 = command
+                .params
+                .as_ref()
+                .and_then(|p| p.get("amount"))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3)
+                .min(10)
+                .max(1);
+            let scroll_amount = if dir == "up" { amount } else { -amount };
+            enigo
+                .scroll(scroll_amount, enigo::Axis::Vertical)
+                .map_err(|e| format!("scroll_window failed: {}", e))?;
+            info!("🖱️  Scrolled {} {} ticks", dir, amount);
+        }
+
+        // ReadClipboard and GetActiveWindowTitle are handled outside execute_command
+        // (they produce a ToolResultPayload rather than performing an action).
+        AgentActionType::ReadClipboard | AgentActionType::GetActiveWindowTitle => {
+            info!("ℹ️  Skill {} delegated to tool result handler", format!("{:?}", command.action));
+        }
     }
 
     Ok(())
@@ -492,6 +574,103 @@ fn map_key_string(key: &str) -> Result<Key, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Skill Query Execution (returns data to backend)
+// ---------------------------------------------------------------------------
+
+/// Execute a data-querying skill tool and return a ToolResultPayload.
+///
+/// These skills don't perform OS actions — they read data and return it
+/// so the backend can inject it into the next LLM call.
+fn execute_skill_query(action: &AgentActionType) -> ToolResultPayload {
+    match action {
+        AgentActionType::ReadClipboard => {
+            match Clipboard::new().and_then(|mut c| c.get_text()) {
+                Ok(text) => {
+                    info!("📋 Read {} chars from clipboard", text.len());
+                    ToolResultPayload {
+                        tool_name: "read_clipboard".to_string(),
+                        data: text,
+                        success: true,
+                        error: None,
+                    }
+                }
+                Err(e) => {
+                    warn!("⚠️  read_clipboard failed: {}", e);
+                    ToolResultPayload {
+                        tool_name: "read_clipboard".to_string(),
+                        data: String::new(),
+                        success: false,
+                        error: Some(format!("read_clipboard error: {}", e)),
+                    }
+                }
+            }
+        }
+
+        AgentActionType::GetActiveWindowTitle => {
+            let result = get_active_window_title();
+            match result {
+                Ok(title) => {
+                    info!("🪟 Active window: {}", title);
+                    ToolResultPayload {
+                        tool_name: "get_active_window_title".to_string(),
+                        data: title,
+                        success: true,
+                        error: None,
+                    }
+                }
+                Err(e) => {
+                    warn!("⚠️  get_active_window_title failed: {}", e);
+                    ToolResultPayload {
+                        tool_name: "get_active_window_title".to_string(),
+                        data: String::new(),
+                        success: false,
+                        error: Some(format!("window title error: {}", e)),
+                    }
+                }
+            }
+        }
+
+        _ => ToolResultPayload {
+            tool_name: "unknown".to_string(),
+            data: String::new(),
+            success: false,
+            error: Some("Not a query-type skill".to_string()),
+        },
+    }
+}
+
+/// Get the title of the currently focused window using platform-specific APIs.
+fn get_active_window_title() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let output = Command::new("osascript")
+            .args(["-e", "tell application \"System Events\" to get name of first process whose frontmost is true"])
+            .output()
+            .map_err(|e| format!("osascript failed: {}", e))?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        let output = Command::new("xdotool")
+            .args(["getactivewindow", "getwindowname"])
+            .output()
+            .map_err(|e| format!("xdotool failed: {}", e))?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let output = Command::new("powershell")
+            .args(["-Command", "(Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | Sort-Object CPU -Descending | Select-Object -First 1).MainWindowTitle"])
+            .output()
+            .map_err(|e| format!("powershell failed: {}", e))?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket Loop (with kill switch + mouse override)
 // ---------------------------------------------------------------------------
 
@@ -522,7 +701,12 @@ async fn websocket_loop() {
                 info!("✅ Connected to gateway!");
                 reconnect_delay = RECONNECT_DELAY_SECS;
 
-                let (mut write, mut read) = ws_stream.split();
+                let (write, mut read) = ws_stream.split();
+                // Share the write half between the READER (tool result responses)
+                // and the WRITER (periodic observation frames).
+                let write_shared = Arc::new(tokio::sync::Mutex::new(write));
+                let write_for_reader = Arc::clone(&write_shared);
+
                 let is_connected = Arc::new(AtomicBool::new(true));
                 let bounds_for_reader = Arc::clone(&current_bounds);
                 let connected_flag = Arc::clone(&is_connected);
@@ -554,24 +738,53 @@ async fn websocket_loop() {
                                         let last_x = LAST_MOUSE_X.load(Ordering::SeqCst);
                                         let last_y = LAST_MOUSE_Y.load(Ordering::SeqCst);
 
-                                        match execute_command_safe(
-                                            &mut enigo,
-                                            &cmd,
-                                            &bounds,
-                                            last_x,
-                                            last_y,
-                                        ) {
-                                            ExecutionResult::Success => {}
-                                            ExecutionResult::KillSwitch => {
-                                                warn!("🔴 Kill switch — skipping command");
-                                                break;
+                                        // Query-type skills return data to the backend instead of
+                                        // performing an OS action. Send a tool_result observation.
+                                        let is_query = matches!(
+                                            cmd.action,
+                                            AgentActionType::ReadClipboard | AgentActionType::GetActiveWindowTitle
+                                        );
+
+                                        if is_query {
+                                            let tool_result = execute_skill_query(&cmd.action);
+                                            info!("📤 Sending tool_result for {:?}", cmd.action);
+
+                                            let ts = SystemTime::now()
+                                                .duration_since(UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_secs();
+
+                                            let payload = DeviceObservationPayload {
+                                                device_id: DEVICE_ID.to_string(),
+                                                timestamp: ts,
+                                                screen_base64: String::new(), // no screenshot needed for tool results
+                                                screen_bounds: bounds,
+                                                status: None,
+                                                tool_result: Some(tool_result),
+                                            };
+
+                                            if let Ok(json) = serde_json::to_string(&payload) {
+                                                let _ = write_for_reader.lock().await.send(Message::Text(json)).await;
                                             }
-                                            ExecutionResult::MouseOverride => {
-                                                warn!("🚫 Mouse override — AI action cancelled");
-                                                // The writer loop will send the interrupt payload.
-                                            }
-                                            ExecutionResult::Error(e) => {
-                                                error!("❌ Execution failed: {}", e);
+                                        } else {
+                                            match execute_command_safe(
+                                                &mut enigo,
+                                                &cmd,
+                                                &bounds,
+                                                last_x,
+                                                last_y,
+                                            ) {
+                                                ExecutionResult::Success => {}
+                                                ExecutionResult::KillSwitch => {
+                                                    warn!("🔴 Kill switch — skipping command");
+                                                    break;
+                                                }
+                                                ExecutionResult::MouseOverride => {
+                                                    warn!("🚫 Mouse override — AI action cancelled");
+                                                }
+                                                ExecutionResult::Error(e) => {
+                                                    error!("❌ Execution failed: {}", e);
+                                                }
                                             }
                                         }
                                     }
@@ -602,11 +815,11 @@ async fn websocket_loop() {
                         warn!("🔴 Kill switch activated — severing WebSocket connection");
 
                         let payload = create_interrupted_payload("kill_switch");
+                        let mut w = write_shared.lock().await;
                         if let Ok(json) = serde_json::to_string(&payload) {
-                            let _ = write.send(Message::Text(json.into())).await;
+                            let _ = w.send(Message::Text(json.into())).await;
                         }
-
-                        let _ = write.send(Message::Close(None)).await;
+                        let _ = w.send(Message::Close(None)).await;
                         info!("📪 Connection severed by kill switch");
                         break;
                     }
@@ -646,7 +859,7 @@ async fn websocket_loop() {
                                 }
                             };
 
-                            if write.send(Message::Text(json.into())).await.is_err() {
+                            if write_shared.lock().await.send(Message::Text(json.into())).await.is_err() {
                                 warn!("⚠️  Send failed — connection lost");
                                 break;
                             }

@@ -1,29 +1,19 @@
 /**
  * OpenDesk AI — Vision LLM System Prompts
  *
- * These prompts are injected as the `system` message when calling the
- * Vision LLM. They force the model to return ONLY valid JSON in the
- * AgentActionCommand format — never markdown, never conversational text.
- *
- * See AI_CONTEXT.md §3.C for the strict output rules.
+ * Injects the system message for every Vision LLM call.
+ * Forces the model to output ONLY valid JSON (AgentActionCommand format).
+ * Includes the ADDITIONAL OS TOOLS section from the skills registry.
  */
 
-/**
- * Core system prompt for the Vision LLM.
- *
- * Forces the model to:
- * - Act as a remote computer operator
- * - Output ONLY a single JSON object (AgentActionCommand)
- * - Never wrap output in markdown code fences
- * - Never include explanatory text
- * - Use `done` action when the goal is achieved
- */
-export const AGENT_SYSTEM_PROMPT = `You are an autonomous computer operator. You control a remote desktop by issuing precise actions.
+import { buildSkillsPromptSection } from './skills/registry';
+
+const BASE_SYSTEM_PROMPT = `You are an autonomous computer operator. You control a remote desktop by issuing precise actions.
 
 ## YOUR CAPABILITIES
 You can see the current state of the screen via a screenshot. Based on what you see, you must decide the SINGLE NEXT ACTION to take to accomplish the user's goal.
 
-## AVAILABLE ACTIONS
+## CORE ACTIONS
 - "mouse_move": Move the mouse cursor to specific coordinates.
 - "mouse_click": Click at specific coordinates.
 - "mouse_double_click": Double-click at specific coordinates.
@@ -35,7 +25,7 @@ You can see the current state of the screen via a screenshot. Based on what you 
 You MUST respond with EXACTLY ONE raw JSON object. Nothing else.
 
 CORRECT output example:
-{"action":"mouse_click","coordinates":{"x":500,"y":300},"text":null,"key":null}
+{"action":"mouse_click","coordinates":{"x":500,"y":300},"text":null,"key":null,"params":null}
 
 WRONG outputs (NEVER do these):
 - \`\`\`json\\n{...}\\n\`\`\` ← NO markdown fences
@@ -44,33 +34,43 @@ WRONG outputs (NEVER do these):
 
 ## JSON SCHEMA
 {
-  "action": "mouse_move" | "mouse_click" | "mouse_double_click" | "keyboard_type" | "keyboard_press" | "done",
+  "action": "mouse_move" | "mouse_click" | "mouse_double_click" | "keyboard_type" | "keyboard_press" | "done" | "read_clipboard" | "write_clipboard" | "scroll_window" | "get_active_window_title",
   "coordinates": { "x": <integer>, "y": <integer> } | null,
   "text": "<string>" | null,
-  "key": "<string>" | null
+  "key": "<string>" | null,
+  "params": { "<param_name>": "<value>" } | null
 }
 
 ## RULES
-1. For mouse actions, "coordinates" is REQUIRED. For keyboard actions, it is null.
-2. For "keyboard_type", "text" is REQUIRED. For other actions, it is null.
+1. For mouse actions, "coordinates" is REQUIRED. For keyboard/tool actions, it is null.
+2. For "keyboard_type" or "write_clipboard", "text" is REQUIRED. For other actions, it is null.
 3. For "keyboard_press", "key" is REQUIRED. For other actions, it is null.
-4. Coordinates must be within the screen bounds provided.
-5. If you are stuck or the screen hasn't changed after your action, try a DIFFERENT approach.
-6. When the goal is fully accomplished, respond with: {"action":"done","coordinates":null,"text":null,"key":null}
-7. Output RAW JSON ONLY. No wrapper text. No explanations. No markdown.`;
+4. For skill tools, use "params" as described in the ADDITIONAL OS TOOLS section.
+5. Coordinates must be within the screen bounds provided.
+6. If you are stuck or the screen hasn't changed, try a DIFFERENT approach.
+7. When the goal is fully accomplished: {"action":"done","coordinates":null,"text":null,"key":null,"params":null}
+8. Output RAW JSON ONLY. No wrapper text. No explanations. No markdown.`;
 
 /**
- * Build the user message with goal, action history, and persona context.
+ * Full system prompt assembled from base + skills section.
+ * The skills section is dynamically built from the registry.
+ */
+export const AGENT_SYSTEM_PROMPT = `${BASE_SYSTEM_PROMPT}\n\n${buildSkillsPromptSection()}`;
+
+/**
+ * Build the user message with goal, action history, tool results, and persona context.
  *
  * @param goal - The user's natural language task description.
  * @param historyText - Formatted string of previous actions taken in this session.
  * @param personaRules - Optional RAG-retrieved user behavior rules.
+ * @param toolResult - Optional result from a previous data-returning skill call.
  * @returns The user-role message content string.
  */
 export function buildUserMessage(
     goal: string,
     historyText: string,
-    personaRules?: string
+    personaRules?: string,
+    toolResult?: { toolName: string; data: string; success: boolean; error?: string }
 ): string {
     const parts: string[] = [];
 
@@ -78,6 +78,22 @@ export function buildUserMessage(
 
     if (personaRules) {
         parts.push(`## USER PREFERENCES\nFollow these rules strictly:\n${personaRules}`);
+    }
+
+    if (toolResult) {
+        if (toolResult.success) {
+            parts.push(
+                `## TOOL RESULT (from previous action: ${toolResult.toolName})\n` +
+                `The tool returned the following data. Use it to inform your next action:\n\n` +
+                `"${toolResult.data}"`
+            );
+        } else {
+            parts.push(
+                `## TOOL RESULT (from previous action: ${toolResult.toolName})\n` +
+                `The tool failed with error: ${toolResult.error || 'unknown error'}.\n` +
+                `Try a different approach.`
+            );
+        }
     }
 
     if (historyText) {
@@ -91,9 +107,6 @@ export function buildUserMessage(
 
 /**
  * Format action history into a human-readable string for the LLM context.
- *
- * @param history - Array of previous action entries.
- * @returns Formatted string showing each step.
  */
 export function formatActionHistory(
     history: Array<{

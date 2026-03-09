@@ -1,0 +1,82 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# OpenDesk AI — Caddyfile
+#
+# Caddy automatically provisions and renews Let's Encrypt TLS certificates.
+# Replace the placeholder domains with your actual domains before deploying.
+#
+# Routing:
+#   https://app.opendesk.ai         → Next.js frontend  :3000
+#   https://app.opendesk.ai/api/*   → Node.js backend   :3001
+#   wss://gateway.opendesk.ai/ws    → Go Gateway        :8080  (WebSocket)
+#   https://gateway.opendesk.ai/*   → Go Gateway        :8080  (HTTP REST)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Web Dashboard + Backend API ──────────────────────────────────────────────
+app.opendesk.ai {
+    # All /api/* requests go to the Node.js backend.
+    handle /api/* {
+        reverse_proxy backend:3001 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # SSE streams: disable buffering so events arrive immediately.
+    handle /api/stream/* {
+        reverse_proxy backend:3001 {
+            header_up X-Real-IP {remote_host}
+            flush_interval -1
+        }
+    }
+
+    # Everything else → Next.js frontend.
+    handle {
+        reverse_proxy frontend:3000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Security headers.
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # Compress responses.
+    encode gzip zstd
+}
+
+# ── Go Gateway — WebSocket (wss://) + HTTP ───────────────────────────────────
+gateway.opendesk.ai {
+    # WebSocket upgrade: critical for wss:// to work.
+    # The Rust desktop client connects here via its GATEWAY_WS_URL env var.
+    handle /ws* {
+        reverse_proxy gateway:8080 {
+            header_up Host              {upstream_hostport}
+            header_up X-Real-IP        {remote_host}
+            header_up X-Forwarded-For  {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            # These headers tell Caddy to handle the WebSocket upgrade transparently.
+            # Caddy handles Connection: Upgrade / Upgrade: websocket automatically
+            # when the upstream responds with 101 Switching Protocols.
+        }
+    }
+
+    # Health check and REST fallback.
+    handle {
+        reverse_proxy gateway:8080 {
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        -Server
+    }
+}
