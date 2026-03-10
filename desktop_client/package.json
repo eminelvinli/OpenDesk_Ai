@@ -1,0 +1,13 @@
+{
+  "name": "opendesk-desktop-client",
+  "version": "0.1.0",
+  "description": "OpenDesk AI Desktop Client — Tauri frontend",
+  "private": true,
+  "scripts": {
+    "dev": "echo 'Use cargo tauri dev from root'",
+    "build": "cargo tauri build",
+    "tauri": "tauri"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
