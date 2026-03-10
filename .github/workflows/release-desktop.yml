@@ -1,0 +1,147 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# OpenDesk AI — Desktop Client Release Pipeline
+#
+# Builds professional installers for Windows (.exe NSIS + .msi),
+# macOS (.dmg), and Linux (.AppImage + .deb) using the official
+# tauri-apps/tauri-action GitHub Action.
+#
+# Triggered on semver tags pushed to main (e.g. `git tag v0.1.0 && git push --tags`).
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Release Desktop Client
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+  # Allow manual trigger for testing the pipeline.
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same tag (prevents duplicate artifact uploads).
+concurrency:
+  group: release-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Production Gateway URL injected at compile time.
+  GATEWAY_WS_URL: ${{ secrets.GATEWAY_WS_URL }}
+
+jobs:
+  build-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Windows ──────────────────────────────
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: '--target x86_64-pc-windows-msvc'
+            label: Windows x64
+
+          # ── macOS (Intel) ────────────────────────
+          - platform: macos-13
+            target: x86_64-apple-darwin
+            args: '--target x86_64-apple-darwin'
+            label: macOS Intel
+
+          # ── macOS (Apple Silicon) ────────────────
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            args: '--target aarch64-apple-darwin'
+            label: macOS ARM64
+
+          # ── Linux ────────────────────────────────
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            args: '--target x86_64-unknown-linux-gnu'
+            label: Linux x64
+
+    runs-on: ${{ matrix.platform }}
+    name: Build (${{ matrix.label }})
+
+    permissions:
+      contents: write  # Required for creating GitHub releases and uploading artifacts.
+
+    steps:
+      # ── Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Node.js (for Tauri frontend build) ──────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: './desktop_client/package-lock.json'
+
+      # ── Rust toolchain ──────────────────────────────────────────────────
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # ── Rust build cache (speeds up subsequent builds by ~60%) ──────────
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './desktop_client/src-tauri -> target'
+
+      # ── Linux system dependencies (WebKit, AppIndicator) ────────────────
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      # ── Install desktop_client frontend dependencies ────────────────────
+      - name: Install frontend dependencies
+        working-directory: desktop_client
+        run: npm install
+
+      # ── Build & release via official Tauri Action ───────────────────────
+      - name: Build Tauri application
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS code signing (optional — set in repo secrets if you have a cert).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: desktop_client
+          tauriScript: cargo tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: 'OpenDesk AI ${{ github.ref_name }}'
+          releaseBody: |
+            ## OpenDesk AI ${{ github.ref_name }}
+
+            ### Downloads
+            | Platform | File |
+            |----------|------|
+            | Windows  | `.exe` (NSIS installer) or `.msi` |
+            | macOS    | `.dmg` (drag to Applications) |
+            | Linux    | `.AppImage` or `.deb` |
+
+            ### What's new
+            See [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+
+            ### First-time setup
+            1. Install and launch OpenDesk AI
+            2. Note the 6-digit pairing code
+            3. Enter it at https://app.opendesk.ai/pair
+          releaseDraft: true          # Creates a draft — manually publish when ready.
+          prerelease: false
+          args: ${{ matrix.args }}

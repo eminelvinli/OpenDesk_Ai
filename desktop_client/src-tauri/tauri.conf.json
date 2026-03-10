@@ -28,7 +28,7 @@
     },
     "bundle": {
         "active": true,
-        "targets": ["nsis", "msi", "app", "dmg", "updater"],
+        "targets": "all",
         "icon": [
             "icons/32x32.png",
             "icons/128x128.png",
@@ -43,9 +43,6 @@
         "linux": {
             "appimage": {
                 "bundleMediaFramework": true
-            },
-            "deb": {
-                "depends": ["libwebkit2gtk-4.1-0", "libappindicator3-1"]
             }
         },
         "macOS": {
@@ -61,22 +58,12 @@
             "timestampUrl": "",
             "nsis": {
                 "installMode": "currentUser",
-                "displayLanguageSelector": false,
-                "license": "../LICENSE.txt"
+                "displayLanguageSelector": false
             },
             "wix": {
                 "bannerPath": null,
                 "dialogImagePath": null
             }
-        }
-    },
-    "plugins": {
-        "notification": {
-            "all": true
-        },
-        "shell": {
-            "all": false,
-            "open": true
         }
     }
 }
