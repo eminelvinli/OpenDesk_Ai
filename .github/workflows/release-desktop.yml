@@ -35,14 +35,17 @@ jobs:
         include:
           # ── Windows ──────────────────────────────
           - platform: windows-latest
+            args: ''
             label: Windows x64
 
           # ── macOS (Apple Silicon) ────────────────
           - platform: macos-latest
+            args: '--target aarch64-apple-darwin'
             label: macOS ARM64
 
           # ── Linux ────────────────────────────────
           - platform: ubuntu-22.04
+            args: ''
             label: Linux x64
 
     runs-on: ${{ matrix.platform }}
@@ -130,3 +133,4 @@ jobs:
             3. Enter it at https://app.opendesk.ai/pair
           releaseDraft: true
           prerelease: false
+          args: ${{ matrix.args }}
